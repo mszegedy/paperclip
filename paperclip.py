@@ -98,7 +98,9 @@ class OurCmdLine(cmd.Cmd):
     settings = {'calculation': True,
                 'caching': True,
                 'plotting': True,
-                'recalculate_energies': True}
+                'recalculate_energies': True,
+                'continuous_mode': True}
+    timelimit = 0
 
     ## Housekeeping
     def do_quit(self, arg):
@@ -173,7 +175,23 @@ class OurCmdLine(cmd.Cmd):
             print('{0:<12}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
         """Set or toggle a yes/no setting variable in the current session:
-  set calculation no  |  set calculation"""
+  set calculation no  |  set calculation
+
+Available settings are:
+  caching: Whether to cache the results of calculations or not.
+  calculation: Whether to perform new calculations for values that may be
+      outdated in the cache, or just use the possibly outdated cached values.
+      Turning this off disables caching, even if 'caching' is set to 'yes'.
+  continuous_mode: Repeat all analysis and plotting commands until they hit the
+      time limit, or forever. Useful if a program is still generating data for
+      a directory, but you want to start caching now. (To set a time limit, use
+      the command 'set_timelimit'.)
+  plotting: Whether to actually output plots, or to just perform and cache the
+      calculations for them. Disabling both this and 'calculation' makes most
+      analysis and plotting commands do nothing.
+  recalculate_energies: Recalculate energies found in cache when plotting. This
+      may be necessary if they were computed with a custom scorefxn that wasn't
+      recorded in the cache file."""
         args = arg.split()
         varname  = None
         varvalue = None
@@ -213,6 +231,18 @@ class OurCmdLine(cmd.Cmd):
             return list(self.settings.keys())
         elif position == 2:
             return [i for i in ['yes', 'no'] if i.startswith(text)]
+    def do_get_timelimit(self, arg):
+        """Print the current time limit set on analysis commands:
+  get_timelimit"""
+        print(str(self.timelimit)+' seconds')
+    def do_set_timelimit(self, arg):
+        """Set a time limit on analysis commands, in seconds. Leave as 0 to let
+commands run indefinitely:
+   set_timelimit 60"""
+        try:
+            self.timelimit = int(arg)
+        except ValueError:
+            print("Enter an integer value of seconds.")
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
@@ -257,5 +287,27 @@ class OurCmdLine(cmd.Cmd):
             return [i for i in patches_list if i.startswith(text)]
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description("Interactive command-line interface for plotting and "
+                    "analysis of batches of PDB files."))
+    parser.add_argument("--background",
+                        dest="backgroundp",
+                        action="store_true",
+                        help="Run given script in background and then "
+                             "terminate. If no script is given, just do "
+                             "nothing and terminate.")
+    parser.add_argument("--continuous",
+                        dest="continuousp",
+                        action="store_true",
+                        help="Re-run caching operations until they hit the "
+                             "time limit or forever. By default, suppresses "
+                             "plots.")
+    parser.add_argument("script",
+                        dest="script",
+                        action="store"
+                        default=None
+                        help=".cmd file to run before entering interactive "
+                             "mode.")
     PYROSETTA_ENV = PyRosettaEnv()
+    OURCMDLINE = OurCmdLine()
     OurCmdLine().cmdloop()

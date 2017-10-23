@@ -2,3 +2,12 @@ PAPERCLIP
 
 (Plotting and Analyzing Proteins Employing Rosetta Command Line Interface
  Program)
+
+Depends on:
+  Unix-like shell
+  Python3
+  PyRosetta
+  mszpyrosettaextension
+  intel_mkl
+  matplotlib
+  
