@@ -12,7 +12,7 @@ interest. Most plotting commands are based on Matlab commands.
 '''
 
 import os, sys
-import fcntl, hashlib, json, time
+import argparse, fcntl, hashlib, json, re, subprocess, time
 import cmd
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
@@ -30,6 +30,7 @@ def needs_pr_init(f):
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
         if not PYROSETTA_ENV.initp:
+            print('PyRosetta not initialized yet. Initializing...')
             pr.init()
             PYROSETTA_ENV.initp = True
         return f(*args, **kwargs)
@@ -44,6 +45,27 @@ def needs_pr_scorefxn(f):
             PYROSETTA_ENV.set_scorefxn()
         return f(*args, **kwargs)
     return decorated
+
+### Useful functions
+def get_filenames_from_dir_with_extension(dir_path, extension,
+                                          strip_extensions_p=False):
+    """Returns a list of files from a directory with the path stripped, and
+    optionally the extension stripped as well."""
+    path_list = str(subprocess.check_output('ls '+os.path.join(dir_path,
+                                                               '*'+extension),
+                                            shell=True)).split('\\n')
+    # Doesn't hurt to validate twice
+    stripper = None
+    if strip_extensions_p:
+        stripper = re.compile(r'[^\\]/([^/]+)' + re.escape(extension) + r'$')
+    else:
+        stripper = re.compile(r'[^\\]/([^/]+' + re.escape(extension) + r')$')
+    # Premature optimization is the root of all evil, but who wants to run
+    # the same regex twice?
+    return [m.group(1) \
+            for m \
+            in [stripper.search(path) for path in path_list] \
+            if m is not None]
 
 ### Housekeeping classes
 
@@ -75,18 +97,31 @@ class OurCmdLine(cmd.Cmd):
     cmdfile = None
     settings = {'calculation': True,
                 'caching': True,
-                'plotting': True}
+                'plotting': True,
+                'recalculate_energies': True}
 
     ## Housekeeping
     def do_quit(self, arg):
         """Stop recording and exit:  quit"""
         self.close()
         return True
+    def do_bye(self, arg):
+        """Stop recording and exit:  bye"""
+        return self.do_quit(arg)
     def do_EOF(self, arg):
         """Stop recording and exit:  EOF  |  ^D"""
         return self.do_quit(arg)
+    def do_exit(self, arg):
+        """Stop recording and exit:  exit"""
+        return self.do_quit(arg)
     def emptyline(self):
         pass
+
+    ## Parsing
+    def get_arg_position(text, line):
+        """For completion; gets index of current positional argument (returns 1 for
+        first arg, 2 for second arg, etc.)."""
+        return len(line.split()) - (text != '')
 
     ## Recording and playing back commands
     def do_record(self, arg):
@@ -137,7 +172,7 @@ class OurCmdLine(cmd.Cmd):
                                 'no'  if value == False else value
             print('{0:<12}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
-        """Set or toggle a setting variable in the current session:
+        """Set or toggle a yes/no setting variable in the current session:
   set calculation no  |  set calculation"""
         args = arg.split()
         varname  = None
@@ -172,6 +207,12 @@ class OurCmdLine(cmd.Cmd):
                 print('That\'s not a valid setting name. Try '
                       '\'get_settings\'.')
                 return
+    def complete_set(self, text, line, begidx, endidx):
+        position = self.get_arg_position(text, line)
+        if position == 1:
+            return list(self.settings.keys())
+        elif position == 2:
+            return [i for i in ['yes', 'no'] if i.startswith(text)]
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
@@ -195,7 +236,25 @@ class OurCmdLine(cmd.Cmd):
             name = args[0]
         else:
             print('Incorrect command usage. Try \'help set_scorefxn\'')
+        if name.startswith('talaris'):
+            print('Setting the scorefxn to a talaris flavor crashes Rosetta. '
+                  'Don\'t do that.')
+            return
         PYROSETTA_ENV.set_scorefxn(name=name, patch=patch)
+    def complete_set_scorefxn(self, text, line, begidx, endidx):
+        scorefxn_list = get_filenames_from_dir_with_extension(
+            '$HOME/.local/lib/python3.5/site-packages/pyrosetta*/pyrosetta/'
+            'database/scoring/weights/',
+            '.wts', strip_extensions_p = True)
+        patches_list = get_filenames_from_dir_with_extension(
+            '$HOME/.local/lib/python3.5/site-packages/pyrosetta*/pyrosetta/'
+            'database/scoring/weights/',
+            '.wts_patch', strip_extensions_p = True)
+        position = self.get_arg_position(text, line)
+        if position == 1 :
+            return [i for i in scorefxn_list if i.startswith(text)]
+        elif position == 2:
+            return [i for i in patches_list if i.startswith(text)]
 
 if __name__ == "__main__":
     PYROSETTA_ENV = PyRosettaEnv()
