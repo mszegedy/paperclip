@@ -11,17 +11,51 @@ revolve around data that I've had to collect for research, or personal
 interest. Most plotting commands are based on Matlab commands.
 '''
 
-import os, sys
-import argparse, cmd, fcntl, hashlib, json, re, subprocess, time
+### Imports
+
+## Python Standard Library
+import re
+import functools, operator
+import hashlib
+import argparse, os, time
+import subprocess
+import json
+import cmd
+import sys
+import fcntl
+## Other stuff
 import timeout_decorator
-import pyrosetta as pr
-import mszpyrosettaextension as mpre
-from pyrosetta.rosetta.core.scoring import all_atom_rmsd
 import matplotlib
 matplotlib.use("Agg") # otherwise lack of display breaks program
 import matplotlib.pyplot as plt
+import pyrosetta as pr
+from pyrosetta.rosetta.core.scoring import all_atom_rmsd
+import mszpyrosettaextension as mpre
 
 PYROSETTA_ENV = None
+ROSETTA_WEIGHT_NAMES = ['fa_atr',
+                        'fa_rep',
+                        'fa_sol',
+                        'fa_intra_rep',
+                        'fa_elec',
+                        'pro_close',
+                        'hbond_sr_bb',
+                        'hbond_lr_bb',
+                        'hbond_bb_sc',
+                        'hbond_sc',
+                        'dslf_fa13',
+                        'rama',
+                        'omega',
+                        'fa_dun',
+                        'p_aa_pp',
+                        'ref']
+ROSETTA_RMSD_TYPES = ['gdtsc',
+                      'CA_rmsd',
+                      'CA_gdtmm',
+                      'bb_rmsd',
+                      'bb_rmsd_including_O',
+                      'all_atom_rmsd',
+                      'nbr_atom_rmsd']
 
 ### Decorators
 
@@ -59,13 +93,24 @@ def times_out(f):
             return f(slf, *args, **kwargs)
     return decorated
 def continuous(f):
-    """Makes a function repeat forever when continuous mode is enabled, and
-    decorates it with times_out."""
+    """Makes a function in OurCmdLine repeat forever when continuous mode is
+    enabled, and decorates it with times_out."""
     @times_out
     def decorated(slf, *args, **kwargs):
         if slf.settings['continuous_mode']:
             while True:
                 f(slf, *args, **kwargs)
+        else:
+            return f(slf, *args, **kwargs)
+    return decorated
+def caching(f):
+    """Makes a function in a PDBDataBuffer save the cache when finished
+    running."""
+    def decorated(slf, *args, **kwargs):
+        if slf.cachingp:
+            retval = f(slf, *args, **kwargs)
+            slf.update_caches()
+            return retval
         else:
             return f(slf, *args, **kwargs)
     return decorated
@@ -90,6 +135,36 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             for m \
             in [stripper.search(path) for path in path_list] \
             if m is not None]
+def recursive_dict_merge(a, b, favor_a_p=False):
+    """Merges two dicts recursively, favoring the second over the first unless
+    otherwise specified."""
+    merged = {}
+    for key in a:
+        merged[key] = a[key]
+    for key in b:
+        if key in merged.keys():
+            if isinstance(merged[key], dict) and \
+               isinstance(b[key], dict):
+                merged[key] = recursive_dict_merge(merged[key], b[key])
+            elif not isinstance(merged[key], dict) and \
+                 not isinstance(b[key], dict):
+                merged[key] = a[key] if favor_a_p else b[key]
+            else:
+                raise ValueError('Incompatible types found in dict'
+                                 'merge.')
+        else:
+            merged[key] = b[key]
+    return merged
+def get_from_dict_with_list(d, l):
+    """Indexes into a multi-layered dict with a list of keywords, one for each
+    layer."""
+    return functools.reduce(operator.getitem, l, d)
+def set_in_dict_with_list(d, l, value):
+    """Sets a value inside a multi-layered dict, indexed with a list of
+    keywords, one for each layer."""
+    for key in l[:-1]:
+        d = d.setdefault(key, {})
+    d[l[-1]] = value
 
 ### Housekeeping classes
 
@@ -122,6 +197,7 @@ class PDBDataBuffer():
       - Scores for any combination of weights
       - RMSD vs protein with another content hash
       - Residue neighborhood matrices for arbitrary bounds
+      - What caches it loaded to create this buffer
 
     It can be asked to log data for any particular calculation performed on any
     particular PDB file. It can also be asked to verify that any particular
@@ -133,60 +209,248 @@ class PDBDataBuffer():
     structure.
     The structure of the buffer's data variable is thus:
 
-    { content_hash : [{ pdb_file_path : mtime_at_hashing },
-                      { weight_param_1 :
-                        { weight_param_2 :
-                          { weight_param_3 : ...
-                            ... : score } } },
-                      { rmsd_type :
-                        { other_content_hash : rmsd }}
-                      { bound : neighborhood_matrix }] }
+    { content_key : [{ pdb_file_path : mtime_at_hashing },
+                     { weight_param_1 :
+                       { weight_param_2 :
+                         { weight_param_3 : ...
+                           ... : score } } },
+                     { rmsd_type :
+                       { other_content_key : rmsd } }
+                     { bound : neighborhood_matrix }] }
     """
+    ## Core functionality
     def __init__(self):
         self.cachingp = True
         self.data = {}
-    def get_file_essentials(self, path):
-        """Returns file's contents, content hash, path, and mtime."""
+    def merge_new_data(self, new_data):
+        """Merges a data dict for a PDBDataBuffer into this one. The new dict
+        takes precence over the old one unless otherwise specified."""
+        for content_key in new_data:
+            if content_key not in self.data.keys():
+                self.data[content_key] = new_data[content_key]
+            else:
+                for index, entry in enumerate(new_data[content_key]):
+                    if index == 0:
+                        for path in entry:
+                            try:
+                                our_mtime = self.data[content_key][0][path]
+                                new_mtime = entry[path]
+                                newest_mtime = \
+                                    our_mtime if our_mtime > new_mtime \
+                                    else new_mtime
+                                self.data[content_key][0][path] = newest_mtime
+                            except KeyError:
+                                self.data[content_key][0][path] = entry[path]
+                    else:
+                        self.data[content_key][index] = \
+                            recursive_dict_merge(self.data[content_key][index],
+                                                 entry)
+    def retrieve_data_from_cache(self, dirpath):
+        """Retrieves data from a cache file of a directory. The data in the
+        file is a JSON of a data dict of a PDBDataBuffer, except instead of
+        file paths, it has just filenames."""
+        retrieved_data = None
+        try:
+            with open(os.path.join(dirpath, '.paperclip_cache'), 'r') as cache_file:
+                try:
+                    retrieved_data = json.loads(cache_file.read())
+                except ValueError:
+                    raise FileNotFoundError('No cache file found.')
+            if retrieved_data:
+                for content_key in retrieved_data:
+                    paths = retrieved_data[content_key][0]
+                    for path in paths:
+                        retrieved_data[content_key]\
+                                      [0][os.path.abspath(path)] = \
+                            retrieved_data[content_key][0][path]
+                        del retrieved_data[content_key][0][path]
+                self.data = self.merge_new_data(retrieved_data)
+        except FileNotFoundError:
+            pass
+    def update_caches(self):
+        """Updates the caches for every directory the cache knows about."""
+        # Basically we need to reorganize the data structure so that stuff is
+        # organized by directory first, then content key, then filename.
+        new_dict = {}
+        for content_key, content_value in self.data.items():
+            for path in content_value[0]:
+                new_dict_key = os.path.dirname(path)
+                filename = os.path.basename(path)
+                if new_dict_key in new_dict:
+                    if content_key in new_dict[new_dict_key] and \
+                       filename not in new_dict[new_dict_key][content_key]:
+                        new_dict[new_dict_key][content_key][0].append(filename)
+                    else:
+                       to_add = self.data[content_key]
+                       to_add[0] = [filename]
+                       new_dict[new_dict_key][content_key] = to_add
+                else:
+                    to_add = {content_key: self.data[content_key]}
+                    to_add[content_key][0] = [filename]
+                    new_dict[new_dict_key] = to_add
+        for dir_path, new_data in new_dict.items():
+            cache_filename = os.path.join(dir_path, '.paperclip_cache')
+            with open(cache_filename, 'w+') as cache_file:
+                # try to get lock on cache file
+                while True:
+                    try:
+                        fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.05)
+                # now that we have a lock, load the newest version of the cache
+                cache_data = None
+                try:
+                    cache_data = json.loads(cache_file.read())
+                except ValueError:
+                    cache_data = {}
+                merged_cache = PDBDataBuffer()
+                merged_cache.data = cache_data
+                merged_cache.merge_new_data(new_data)
+                cache_file.write(json.dumps(merged_cache.data))
+                fcntl.flock(cache_file, fcntl.LOCK_UN)
+    def get_pdb_file_essentials(self, path):
+        """Returns pdb file's contents, content hash, path, and mtime. As a
+        side effect, also updates the data dict with the info of the file."""
         contents = None
         with open(path, 'r') as pdb_file:
             contents = pdb_file.read()
         hash_fun = hashlib.md5()
-        hash_fun.update(contents)
-        content_hash = hash_fun.hexdigest()
+        hash_fun.update(contents.encode())
+        content_key = hash_fun.hexdigest()
         path = os.path.abspath(path) # absolutized
         mtime = os.path.getmtime(path)
-        return (contents, content_hash, path, mtime)
-    def retrieve_data_from_cache(self, dirpath):
-        retrieved_data = None
-        with open(os.path.join(dirpath, '.paperclip_cache'), 'r') as cache_file:
-            try:
-                retrieved_data = json.loads(cache_file.read())
-            except ValueError:
-                pass
-        if retrieved_data:
-            def merge_data(buffer_data, new_data):
-                pass # TODO
-            self.data = merge_data(self.data, retrieved_data)
+        self.data.setdefault(content_key, [{},{},{},{}])
+        print(self.data)
+        print(content_key)
+        self.data[content_key][0].setdefault(path, mtime)
+        return (contents, content_key, path, mtime)
+
+    ## Updating Rosetta stuff
+    # Scoring
     @needs_pr_scorefxn
-    def calculate_pdb_score(self, contents, params=None):
+    def get_score_indices_list(self):
+        """Builds a list of indices to index score with."""
+        global PYROSETTA_ENV
+        return (str(scorefxn.get_weight(
+                        getattr(pr.rosetta.core.scoring, name))) \
+                for name in ROSETTA_WEIGHT_NAMES)
+    @caching
+    @needs_pr_scorefxn
+    def calculate_and_update_pdb_score(self, contents, content_key,
+                                       params=None):
+        """Calculates the score of a protein based on the provided contents of
+        its PDB file."""
         global PYROSETTA_ENV
         pose = None
         if params:
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
         else:
             pose = pr.pose_from_pdbstring(contents)
-        return PYROSETTA_ENV.scorefxn(pose)
+        indices = self.get_score_indices_list()
+        set_in_dict_with_list(self.data[content_key][1],
+                              indices, PYROSETTA_ENV.scorefxn(pose))
     def update_pdb_score(self, path, params=None):
-        contents, content_hash, path, mtime = self.get_file_essentials(path)
-        # have we already loaded the cache at this location?
-        # TODO
-        # create list of args for indexing into score
-        # TODO https://stackoverflow.com/questions/14692690/access-nested-dictionary-items-via-a-list-of-keys
-        # do we already have this info?
-        # TODO
-        # if not, then go ahead and calculate the score, then store it
-        score = calculate_pdb_score(contents, params)
-        # TODO
+        contents, content_key, path, mtime = \
+            self.get_pdb_file_essentials(path)
+        self.retrieve_data_from_cache(os.path.dirname(path))
+        try:
+            if self.data[content_key][0][path] >= mtime and \
+               get_from_dict_with_list(self.data[content_key][1],
+                                       self.get_score_indices_list()):
+                # no need to update
+                return
+        except KeyError:
+            self.calculate_and_update_pdb_score(contents, params)
+    def get_pdb_score_from_path(self, path, params=None):
+        contents, content_key, path, mtime = \
+            self.get_pdb_file_essentials(path)
+        self.update_pdb_score(path, params)
+        indices = self.get_score_indices_list()
+        return get_from_dict_with_list(self.data[content_key][1], indices)
+    # RMSDing
+    @caching
+    @needs_pr_init
+    def calculate_and_update_pdb_rmsd(self, contents_lhs, content_key_lhs,
+                                      contents_rhs, content_key_rhs,
+                                      rmsd_type, params=None):
+        """Calculates the RMSD of two proteins from each other and stores
+        it, without assuming commutativity."""
+        pose_lhs = None
+        if params:
+            pose_lhs = mpre.pose_from_pdbstring_with_params(contents_lhs,
+                                                            params)
+        else:
+            pose_lhs = pr.pose_from_pdbstring(contents_lhs)
+        pose_rhs = None
+        if params:
+            pose_rhs = mpre.pose_from_pdbstring_with_params(contents_rhs,
+                                                            params)
+        else:
+            pose_rhs = pr.pose_from_pdbstring(contents_rhs)
+        self.data[content_key_lhs][2].setdefault(rmsd_type,{})
+        self.data[content_key_lhs][2][rmsd_type].setdefault(content_key_rhs,{})
+        self.data[content_key_lhs][2][rmsd_type][content_key_rhs] = \
+            getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
+    def update_pdb_rmsd(self, path_lhs, path_rhs, rmsd_type, params=None):
+        contents_lhs, content_key_lhs, path_lhs, mtime_lhs = \
+            self.get_pdb_file_essentials(path_lhs)
+        self.retrieve_data_from_cache(os.path.dirname(path_lhs))
+        contents_rhs, content_key_rhs, path_rhs, mtime_rhs = \
+            self.get_pdb_file_essentials(path_rhs)
+        self.retrieve_data_from_cache(os.path.dirname(path_rhs))
+        try:
+            if self.data[content_key_lhs][0][path_lhs] >= mtime_lhs and \
+               self.data[content_key_lhs][2][rmsd_type][content_key_rhs]:
+                # no need to update
+                return
+        except KeyError:
+            self.calculate_and_update_pdb_rmsd(contents_lhs, content_key_lhs,
+                                               contents_rhs, content_key_rhs,
+                                               rmsd_type, params)
+    def get_pdb_rmsd_from_path(self, path_lhs, path_rhs, rmsd_type,
+                               params=None):
+        contents_lhs, content_key_lhs, path_lhs, mtime_lhs = \
+            self.get_pdb_file_essentials(path_lhs)
+        contents_rhs, content_key_rhs, path_rhs, mtime_rhs = \
+            self.get_pdb_file_essentials(path_rhs)
+        self.update_pdb_rmsd(path_lhs, path_rhs, rmsd_type, params)
+        return self.data[content_key_lhs][2][rmsd_type]
+    # Finding neighborhood matrices
+    @caching
+    @needs_pr_init
+    def calculate_and_update_pdb_neighbors(self, contents, content_key,
+                                           bound=None, params=None):
+        """Calculates the residue neighborhood matrix of a protein based on the
+        provided contents of its PDB file."""
+        pose = None
+        if params:
+            pose = mpre.pose_from_pdbstring_with_params(contents, params)
+        else:
+            pose = pr.pose_from_pdbstring(contents)
+        result = []
+        n_residues = pose.size()
+        for i in range(n_residues):
+            result.append([])
+            for j in range(n_residues):
+                result[-1].append(mpre.res_neighbors_p(pose,i,j,bound=bound))
+        self.data[content_key][3][str(bound)] = result
+    def update_pdb_neighbors(self, path, bound=None, params=None):
+        contents, content_key, path, mtime = \
+            self.get_pdb_file_essentials(path)
+        self.retrieve_data_from_cache(os.path.dirname(path))
+        try:
+            if self.data[content_key][0][path] >= mtime and \
+               self.data[content_key][3][str(bound)]:
+                # no need to update
+                return
+        except KeyError:
+            self.calculate_and_update_pdb_neighbors(contents, bound, params)
+    def get_pdb_neighbors_from_path(self, path, bound, params=None):
+        contents, content_key, path, mtime = \
+            self.get_pdb_file_essentials(path)
+        self.update_pdb_neighbors(path, bound, params)
+        return self.data[content_key][3][str(bound)]
 
 ### Main class
 
@@ -204,8 +468,8 @@ class OurCmdLine(cmd.Cmd):
                 'continuous_mode': False}
     timelimit = 0
     ## The two buffers:
-    data_buffer = {} # contains computed data about PDBs
-    text_buffer = '' # contains text output
+    data_buffer = PDBDataBuffer() # contains computed data about PDBs
+    text_buffer = ''              # contains text output
     # There is also a plot buffer, but that is contained within pyplot.
 
     ## Housekeeping
@@ -352,16 +616,20 @@ commands run indefinitely:
 
     ## Buffer interaction
     # Data buffer
-    def do_clear_data_buffer(self, arg):
-        """Clear the data buffer of any calculated data:  clear_data_buffer"""
-        self.data_buffer = {}
+    def do_clear_data(self, arg):
+        """Clear the data buffer of any data:  clear_data"""
+        self.data_buffer = PDBDataBuffer()
     # Text buffer
-    def do_clear_text_buffer(self, arg):
-        """Clear the text buffer of any text output:  clear_text_buffer"""
+    def do_clear_text(self, arg):
+        """Clear the text buffer of any text output:  clear_text"""
         self.text_buffer = ''
-    def do_view_text_buffer(self, arg):
-        """View the text buffer, less-style:  view_text_buffer"""
+    def do_view_text(self, arg):
+        """View the text buffer, less-style:  view_text"""
         subprocess.run(['less'], input=bytes(self.text_buffer, 'utf-8'))
+    # Plot buffer
+    def do_clear_plot(self, arg):
+        """Clear the plot buffer:  clear_plot"""
+        plt.cla()
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
@@ -404,6 +672,62 @@ commands run indefinitely:
             return [i for i in scorefxn_list if i.startswith(text)]
         elif position == 2:
             return [i for i in patches_list if i.startswith(text)]
+
+    ## Plots
+    def do_plot_title(self, arg):
+        """Set the title of the current plot:  plot_title My title"""
+        plt.title(arg)
+    def do_plot_xlabel(self, arg):
+        """Set the xlabel of the current plot:  plot_xlabel My xlabel"""
+        plt.xlabel(arg)
+    def do_plot_ylabel(self, arg):
+        """Set the ylabel of the current plot:  plot_ylabel My ylabel"""
+        plt.ylabel(arg)
+    def do_save_plot(self, arg):
+        """Save the plot currently in the plot buffer:  save_plot"""
+        plt.savefig(arg, format=arg.split('.')[-1].lower())
+    def do_plot_dir_rmsd_vs_score(self, arg):
+        """For each PDB in a directory, plot the RMSDs vs a particular file
+against their energy score:
+    plot_dir_rmsd_vs_score indir infile.pdb  |
+    plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
+    plot_dir_rmsd_vs_score indir infile.pdb 4.6"""
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--in_dir',
+                            dest='in_dir',
+                            action='store')
+        parser.add_argument('--in_file',
+                            dest='in_file',
+                            action='store')
+        parser.add_argument('bound',
+                            action='store',
+                            nargs='?',
+                            default=None)
+        parser.add_argument('--style',
+                            dest='style',
+                            action='store',
+                            default='ro')
+        parser.add_argument('--params',
+                            dest='params',
+                            action='store',
+                            nargs=argparse.REMAINDER,
+                            default=None)
+        parsed_args = parser.parse_args(arg.split())
+        filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        data = ((self.data_buffer.get_pdb_rmsd_from_path(
+                     parsed_args.in_file,
+                     os.path.join(parsed_args.in_dir, filename),
+                     'all_atom_rmsd', parsed_args.params),
+                 self.data_buffer.get_pdb_score_from_path(
+                     os.path.join(parsed_args.in_dir,
+                                  filename), parsed_args.params)) \
+                for filename in filenames_in_in_dir \
+                if filename.endswith('.pdb'))
+        data = (datapoint for datapoint in data \
+                if datapoint[1] < 0)
+        rmsds  = [datapoint[0] for datapoint in data]
+        scores = [datapoint[1] for datapoint in data]
+        plt.plot(rmsds, scores, parsed_args.style)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
