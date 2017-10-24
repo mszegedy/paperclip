@@ -138,14 +138,13 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
 def recursive_dict_merge(a, b, favor_a_p=False):
     """Merges two dicts recursively, favoring the second over the first unless
     otherwise specified."""
-    merged = {}
-    for key in a:
-        merged[key] = a[key]
+    merged = a
     for key in b:
-        if key in merged.keys():
+        if key in merged:
             if isinstance(merged[key], dict) and \
                isinstance(b[key], dict):
-                merged[key] = recursive_dict_merge(merged[key], b[key])
+                merged[key] = recursive_dict_merge(merged[key], b[key],
+                                                   favor_a_p)
             elif not isinstance(merged[key], dict) and \
                  not isinstance(b[key], dict):
                 merged[key] = a[key] if favor_a_p else b[key]
@@ -279,10 +278,11 @@ class PDBDataBuffer():
                 if new_dict_key in new_dict:
                     if content_key in new_dict[new_dict_key] and \
                        filename not in new_dict[new_dict_key][content_key]:
-                        new_dict[new_dict_key][content_key][0].append(filename)
+                        new_dict[new_dict_key][content_key][0][filename] = \
+                            content_value[0][filename]
                     else:
                        to_add = self.data[content_key]
-                       to_add[0] = [filename]
+                       to_add[0] = {filename: content_value[0][filename]}
                        new_dict[new_dict_key][content_key] = to_add
                 else:
                     to_add = {content_key: self.data[content_key]}
