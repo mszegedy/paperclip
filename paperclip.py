@@ -1,7 +1,7 @@
 #!/opt/sw/packages/gcc-4.8/python/3.5.2/bin/python3
 
 #### paperclip.py
-#### Plotting and Analyzing Proteins Employing Rosetta CLI Program
+#### Plotting and Analyzing Proteins Employing Rosetta CLI with PAPERCLIP
 #### by Michael Szegedy, 2017 Oct
 #### for Khare Lab at Rutgers University
 
@@ -12,8 +12,8 @@ interest. Most plotting commands are based on Matlab commands.
 '''
 
 import os, sys
-import argparse, fcntl, hashlib, json, re, subprocess, time
-import cmd
+import argparse, cmd, fcntl, hashlib, json, re, subprocess, time
+import timeout_decorator
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
 from pyrosetta.rosetta.core.scoring import all_atom_rmsd
@@ -42,8 +42,32 @@ def needs_pr_scorefxn(f):
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
         if PYROSETTA_ENV.scorefxn is None:
+            print('Scorefxn not initialized yet. Initializing from defaults...')
             PYROSETTA_ENV.set_scorefxn()
         return f(*args, **kwargs)
+    return decorated
+def times_out(f):
+    """Makes a function time out after it hits self.timelimit."""
+    def decorated(slf, *args, **kwargs):
+        if slf.timelimit:
+            try:
+                return timeout_decorator\
+                    .timeout(slf.timelimit)(f)(slf, *args, **kwargs)
+            except timeout_decorator.TimeoutError:
+                print('Timed out.')
+        else:
+            return f(slf, *args, **kwargs)
+    return decorated
+def continuous(f):
+    """Makes a function repeat forever when continuous mode is enabled, and
+    decorates it with times_out."""
+    @times_out
+    def decorated(slf, *args, **kwargs):
+        if slf.settings['continuous_mode']:
+            while True:
+                f(slf, *args, **kwargs)
+        else:
+            return f(slf, *args, **kwargs)
     return decorated
 
 ### Useful functions
@@ -86,6 +110,84 @@ class PyRosettaEnv():
         if patch:
             self.scorefxn.apply_patch_from_file(patch)
 
+class PDBDataBuffer():
+    """Singleton class that stores information about PDBs, to be used as this
+    program's data buffer. Dict-reliant, so stringly typed. It can store the
+    following things:
+
+      - Contents hashes (in case two PDBs are identical); this is how it indexes
+        its data
+      - List of paths to PDB files that have the corresponding content hash
+      - List of mtimes for each file when its content hash was computed
+      - Scores for any combination of weights
+      - RMSD vs protein with another content hash
+      - Residue neighborhood matrices for arbitrary bounds
+
+    It can be asked to log data for any particular calculation performed on any
+    particular PDB file. It can also be asked to verify that any particular
+    piece of data is up-to-date, and delete it when it isn't. It autonomously
+    creates cache files when performing calculations, unless this behavior is
+    turned off.
+    It is not the buffer's responsibility to keep a directory tree of
+    PDBs. That's the problem of whichever subroutine needs to know the directory
+    structure.
+    The structure of the buffer's data variable is thus:
+
+    { content_hash : [{ pdb_file_path : mtime_at_hashing },
+                      { weight_param_1 :
+                        { weight_param_2 :
+                          { weight_param_3 : ...
+                            ... : score } } },
+                      { rmsd_type :
+                        { other_content_hash : rmsd }}
+                      { bound : neighborhood_matrix }] }
+    """
+    def __init__(self):
+        self.cachingp = True
+        self.data = {}
+    def get_file_essentials(self, path):
+        """Returns file's contents, content hash, path, and mtime."""
+        contents = None
+        with open(path, 'r') as pdb_file:
+            contents = pdb_file.read()
+        hash_fun = hashlib.md5()
+        hash_fun.update(contents)
+        content_hash = hash_fun.hexdigest()
+        path = os.path.abspath(path) # absolutized
+        mtime = os.path.getmtime(path)
+        return (contents, content_hash, path, mtime)
+    def retrieve_data_from_cache(self, dirpath):
+        retrieved_data = None
+        with open(os.path.join(dirpath, '.paperclip_cache'), 'r') as cache_file:
+            try:
+                retrieved_data = json.loads(cache_file.read())
+            except ValueError:
+                pass
+        if retrieved_data:
+            def merge_data(buffer_data, new_data):
+                pass # TODO
+            self.data = merge_data(self.data, retrieved_data)
+    @needs_pr_scorefxn
+    def calculate_pdb_score(self, contents, params=None):
+        global PYROSETTA_ENV
+        pose = None
+        if params:
+            pose = mpre.pose_from_pdbstring_with_params(contents, params)
+        else:
+            pose = pr.pose_from_pdbstring(contents)
+        return PYROSETTA_ENV.scorefxn(pose)
+    def update_pdb_score(self, path, params=None):
+        contents, content_hash, path, mtime = self.get_file_essentials(path)
+        # have we already loaded the cache at this location?
+        # TODO
+        # create list of args for indexing into score
+        # TODO https://stackoverflow.com/questions/14692690/access-nested-dictionary-items-via-a-list-of-keys
+        # do we already have this info?
+        # TODO
+        # if not, then go ahead and calculate the score, then store it
+        score = calculate_pdb_score(contents, params)
+        # TODO
+
 ### Main class
 
 class OurCmdLine(cmd.Cmd):
@@ -99,8 +201,12 @@ class OurCmdLine(cmd.Cmd):
                 'caching': True,
                 'plotting': True,
                 'recalculate_energies': True,
-                'continuous_mode': True}
+                'continuous_mode': False}
     timelimit = 0
+    ## The two buffers:
+    data_buffer = {} # contains computed data about PDBs
+    text_buffer = '' # contains text output
+    # There is also a plot buffer, but that is contained within pyplot.
 
     ## Housekeeping
     def do_quit(self, arg):
@@ -120,7 +226,7 @@ class OurCmdLine(cmd.Cmd):
         pass
 
     ## Parsing
-    def get_arg_position(text, line):
+    def get_arg_position(self, text, line):
         """For completion; gets index of current positional argument (returns 1 for
         first arg, 2 for second arg, etc.)."""
         return len(line.split()) - (text != '')
@@ -172,7 +278,7 @@ class OurCmdLine(cmd.Cmd):
         for key, value in self.settings.items():
             transformed_value = 'yes' if value == True else \
                                 'no'  if value == False else value
-            print('{0:<12}{1:>8}'.format(key+':', transformed_value))
+            print('{0:<20}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
         """Set or toggle a yes/no setting variable in the current session:
   set calculation no  |  set calculation
@@ -228,7 +334,7 @@ Available settings are:
     def complete_set(self, text, line, begidx, endidx):
         position = self.get_arg_position(text, line)
         if position == 1:
-            return list(self.settings.keys())
+            return [i for i in list(self.settings.keys()) if i.startswith(text)]
         elif position == 2:
             return [i for i in ['yes', 'no'] if i.startswith(text)]
     def do_get_timelimit(self, arg):
@@ -238,11 +344,24 @@ Available settings are:
     def do_set_timelimit(self, arg):
         """Set a time limit on analysis commands, in seconds. Leave as 0 to let
 commands run indefinitely:
-   set_timelimit 60"""
+   set_timelimit 600"""
         try:
             self.timelimit = int(arg)
         except ValueError:
             print("Enter an integer value of seconds.")
+
+    ## Buffer interaction
+    # Data buffer
+    def do_clear_data_buffer(self, arg):
+        """Clear the data buffer of any calculated data:  clear_data_buffer"""
+        self.data_buffer = {}
+    # Text buffer
+    def do_clear_text_buffer(self, arg):
+        """Clear the text buffer of any text output:  clear_text_buffer"""
+        self.text_buffer = ''
+    def do_view_text_buffer(self, arg):
+        """View the text buffer, less-style:  view_text_buffer"""
+        subprocess.run(['less'], input=bytes(self.text_buffer, 'utf-8'))
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
@@ -288,8 +407,8 @@ commands run indefinitely:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description("Interactive command-line interface for plotting and "
-                    "analysis of batches of PDB files."))
+        description = "Interactive command-line interface for plotting and "
+                      "analysis of batches of PDB files.")
     parser.add_argument("--background",
                         dest="backgroundp",
                         action="store_true",
@@ -303,11 +422,17 @@ if __name__ == "__main__":
                              "time limit or forever. By default, suppresses "
                              "plots.")
     parser.add_argument("script",
-                        dest="script",
-                        action="store"
-                        default=None
+                        action="store",
+                        nargs='?',
+                        default=None,
                         help=".cmd file to run before entering interactive "
                              "mode.")
+    parsed_args = parser.parse_args()
     PYROSETTA_ENV = PyRosettaEnv()
     OURCMDLINE = OurCmdLine()
-    OurCmdLine().cmdloop()
+    OURCMDLINE.settings['continuous_mode'] = parsed_args.continuousp
+    OURCMDLINE.settings['plotting'] = not parsed_args.continuousp
+    if parsed_args.script is not None:
+        OURCMDLINE.do_playback(parsed_args.script)
+    if not parsed_args.backgroundp:
+        OurCmdLine().cmdloop()
