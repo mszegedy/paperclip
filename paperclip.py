@@ -25,6 +25,7 @@ import sys
 import fcntl
 ## Other stuff
 import timeout_decorator
+import numpy as np
 import matplotlib
 matplotlib.use("Agg") # otherwise lack of display breaks program
 import matplotlib.pyplot as plt
@@ -220,6 +221,7 @@ class PDBDataBuffer():
     ## Core functionality
     def __init__(self):
         self.cachingp = True
+        self.retrieved_caches = {} # location : mtime
         self.data = {}
     def merge_new_data(self, new_data):
         """Merges a data dict for a PDBDataBuffer into this one. The new dict
@@ -248,22 +250,28 @@ class PDBDataBuffer():
         """Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
         file paths, it has just filenames."""
-        retrieved_data = None
         try:
-            with open(os.path.join(dirpath, '.paperclip_cache'), 'r') as cache_file:
-                try:
-                    retrieved_data = json.loads(cache_file.read())
-                except ValueError:
-                    raise FileNotFoundError('No cache file found.')
-            if retrieved_data:
-                for content_key in retrieved_data:
-                    paths = retrieved_data[content_key][0]
-                    for path in paths:
-                        retrieved_data[content_key]\
-                                      [0][os.path.abspath(path)] = \
-                            retrieved_data[content_key][0][path]
-                        del retrieved_data[content_key][0][path]
-                self.data = self.merge_new_data(retrieved_data)
+            cache_path = os.path.join(dirpath, '.paperclip_cache')
+            diskmtime = os.path.getmtime(cache_path)
+            ourmtime = self.retrieved_caches.setdefault(dirpath, 0)
+            if (diskmtime-1) > ourmtime:
+                retrieved_data = None
+                with open(cache_path, 'r') as cache_file:
+                    try:
+                        retrieved_data = json.loads(cache_file.read())
+                    except ValueError:
+                        raise FileNotFoundError('No cache file found.')
+                if retrieved_data:
+                    for content_key, content_value in retrieved_data.items():
+                        paths = content_value[0]
+                        for path in list(paths.keys()):
+                            retrieved_data[content_key]\
+                                        [0][os.path.abspath(
+                                                os.path.join(dirpath, path))] = \
+                                retrieved_data[content_key][0][path]
+                            del retrieved_data[content_key][0][path]
+                    self.merge_new_data(retrieved_data)
+                self.retrieved_caches[dirpath] = diskmtime
         except FileNotFoundError:
             pass
     def update_caches(self):
@@ -272,21 +280,21 @@ class PDBDataBuffer():
         # organized by directory first, then content key, then filename.
         new_dict = {}
         for content_key, content_value in self.data.items():
-            for path in content_value[0]:
+            for path, filemtime in content_value[0].items():
                 new_dict_key = os.path.dirname(path)
                 filename = os.path.basename(path)
                 if new_dict_key in new_dict:
                     if content_key in new_dict[new_dict_key] and \
                        filename not in new_dict[new_dict_key][content_key]:
                         new_dict[new_dict_key][content_key][0][filename] = \
-                            content_value[0][filename]
+                            filemtime
                     else:
                        to_add = self.data[content_key]
-                       to_add[0] = {filename: content_value[0][filename]}
+                       to_add[0] = {filename: filemtime}
                        new_dict[new_dict_key][content_key] = to_add
                 else:
-                    to_add = {content_key: self.data[content_key]}
-                    to_add[content_key][0] = [filename]
+                    to_add = {content_key: content_value}
+                    to_add[content_key][0] = {filename: filemtime}
                     new_dict[new_dict_key] = to_add
         for dir_path, new_data in new_dict.items():
             cache_filename = os.path.join(dir_path, '.paperclip_cache')
@@ -321,8 +329,6 @@ class PDBDataBuffer():
         path = os.path.abspath(path) # absolutized
         mtime = os.path.getmtime(path)
         self.data.setdefault(content_key, [{},{},{},{}])
-        print(self.data)
-        print(content_key)
         self.data[content_key][0].setdefault(path, mtime)
         return (contents, content_key, path, mtime)
 
@@ -332,9 +338,9 @@ class PDBDataBuffer():
     def get_score_indices_list(self):
         """Builds a list of indices to index score with."""
         global PYROSETTA_ENV
-        return (str(scorefxn.get_weight(
+        return [str(PYROSETTA_ENV.scorefxn.get_weight(
                         getattr(pr.rosetta.core.scoring, name))) \
-                for name in ROSETTA_WEIGHT_NAMES)
+                for name in ROSETTA_WEIGHT_NAMES]
     @caching
     @needs_pr_scorefxn
     def calculate_and_update_pdb_score(self, contents, content_key,
@@ -346,7 +352,9 @@ class PDBDataBuffer():
         if params:
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
         else:
-            pose = pr.pose_from_pdbstring(contents)
+            pose = pr.Pose()
+            pose = pr.rosetta.core.import_pose.pose_from_pdbstring(
+                       pose, contents)
         indices = self.get_score_indices_list()
         set_in_dict_with_list(self.data[content_key][1],
                               indices, PYROSETTA_ENV.scorefxn(pose))
@@ -355,13 +363,14 @@ class PDBDataBuffer():
             self.get_pdb_file_essentials(path)
         self.retrieve_data_from_cache(os.path.dirname(path))
         try:
-            if self.data[content_key][0][path] >= mtime and \
+            # mtime-1 to get around rounding errors
+            if self.data[content_key][0][path] >= (mtime-1) and \
                get_from_dict_with_list(self.data[content_key][1],
                                        self.get_score_indices_list()):
                 # no need to update
                 return
         except KeyError:
-            self.calculate_and_update_pdb_score(contents, params)
+            self.calculate_and_update_pdb_score(contents, content_key, params)
     def get_pdb_score_from_path(self, path, params=None):
         contents, content_key, path, mtime = \
             self.get_pdb_file_essentials(path)
@@ -381,13 +390,17 @@ class PDBDataBuffer():
             pose_lhs = mpre.pose_from_pdbstring_with_params(contents_lhs,
                                                             params)
         else:
-            pose_lhs = pr.pose_from_pdbstring(contents_lhs)
+            pose_lhs = pr.Pose()
+            pose_lhs = pr.rosetta.core.import_pose.pose_from_pdbstring(
+                           pose, contents_lhs)
         pose_rhs = None
         if params:
             pose_rhs = mpre.pose_from_pdbstring_with_params(contents_rhs,
                                                             params)
         else:
-            pose_rhs = pr.pose_from_pdbstring(contents_rhs)
+            pose_rhs = pr.Pose()
+            pose_rhs = pr.rosetta.core.import_pose.pose_from_pdbstring(
+                           pose, contents_rhs)
         self.data[content_key_lhs][2].setdefault(rmsd_type,{})
         self.data[content_key_lhs][2][rmsd_type].setdefault(content_key_rhs,{})
         self.data[content_key_lhs][2][rmsd_type][content_key_rhs] = \
@@ -400,7 +413,8 @@ class PDBDataBuffer():
             self.get_pdb_file_essentials(path_rhs)
         self.retrieve_data_from_cache(os.path.dirname(path_rhs))
         try:
-            if self.data[content_key_lhs][0][path_lhs] >= mtime_lhs and \
+            # mtime_lhs-1 to get around rounding errors
+            if self.data[content_key_lhs][0][path_lhs] >= (mtime_lhs-1) and \
                self.data[content_key_lhs][2][rmsd_type][content_key_rhs]:
                 # no need to update
                 return
@@ -427,26 +441,30 @@ class PDBDataBuffer():
         if params:
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
         else:
-            pose = pr.pose_from_pdbstring(contents)
+            pose = pr.Pose()
+            pose = pr.rosetta.core.import_pose.pose_from_pdbstring(
+                       pose, contents)
         result = []
         n_residues = pose.size()
-        for i in range(n_residues):
+        for i in range(1,n_residues+1):
             result.append([])
-            for j in range(n_residues):
+            for j in range(1,n_residues+1):
                 result[-1].append(mpre.res_neighbors_p(pose,i,j,bound=bound))
+        self.data[content_key][3].setdefault(str(bound), result)
         self.data[content_key][3][str(bound)] = result
     def update_pdb_neighbors(self, path, bound=None, params=None):
-        contents, content_key, path, mtime = \
-            self.get_pdb_file_essentials(path)
+        contents, content_key, path, mtime = self.get_pdb_file_essentials(path)
         self.retrieve_data_from_cache(os.path.dirname(path))
         try:
-            if self.data[content_key][0][path] >= mtime and \
+            # mtime-1 to get around rounding errors
+            if self.data[content_key][0][path] >= (mtime-1) and \
                self.data[content_key][3][str(bound)]:
                 # no need to update
                 return
         except KeyError:
-            self.calculate_and_update_pdb_neighbors(contents, bound, params)
-    def get_pdb_neighbors_from_path(self, path, bound, params=None):
+            self.calculate_and_update_pdb_neighbors(contents, content_key,
+                                                    bound, params)
+    def get_pdb_neighbors_from_path(self, path, bound=None, params=None):
         contents, content_key, path, mtime = \
             self.get_pdb_file_essentials(path)
         self.update_pdb_neighbors(path, bound, params)
@@ -683,6 +701,13 @@ commands run indefinitely:
     def do_plot_ylabel(self, arg):
         """Set the ylabel of the current plot:  plot_ylabel My ylabel"""
         plt.ylabel(arg)
+    def do_subplot(self, arg):
+        """Create a subplot with Matlab syntax:  subplot 2 1 1"""
+        args = arg.split()
+        if len(args) == 3:
+            plt.subplot(*[int(a) for a in args])
+        elif len(args) == 1:
+            plt.subplot(int(args[0]))
     def do_save_plot(self, arg):
         """Save the plot currently in the plot buffer:  save_plot"""
         plt.savefig(arg, format=arg.split('.')[-1].lower())
@@ -693,11 +718,9 @@ against their energy score:
     plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
     plot_dir_rmsd_vs_score indir infile.pdb 4.6"""
         parser = argparse.ArgumentParser()
-        parser.add_argument('--in_dir',
-                            dest='in_dir',
+        parser.add_argument('in_dir',
                             action='store')
-        parser.add_argument('--in_file',
-                            dest='in_file',
+        parser.add_argument('in_file',
                             action='store')
         parser.add_argument('bound',
                             action='store',
@@ -710,24 +733,102 @@ against their energy score:
         parser.add_argument('--params',
                             dest='params',
                             action='store',
-                            nargs=argparse.REMAINDER,
+                            nargs='*',
                             default=None)
         parsed_args = parser.parse_args(arg.split())
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        params = None
+        if parsed_args.params:
+            params = []
+            for param in parsed_args.params:
+                if param.endswith('.params'):
+                    params.append(param)
+                else:
+                    params.append(param+'.params')
         data = ((self.data_buffer.get_pdb_rmsd_from_path(
                      parsed_args.in_file,
                      os.path.join(parsed_args.in_dir, filename),
-                     'all_atom_rmsd', parsed_args.params),
+                     'all_atom_rmsd', params),
                  self.data_buffer.get_pdb_score_from_path(
                      os.path.join(parsed_args.in_dir,
-                                  filename), parsed_args.params)) \
+                                  filename), params)) \
                 for filename in filenames_in_in_dir \
                 if filename.endswith('.pdb'))
         data = (datapoint for datapoint in data \
                 if datapoint[1] < 0)
         rmsds  = [datapoint[0] for datapoint in data]
         scores = [datapoint[1] for datapoint in data]
+        print(rmsds)
+        print(scores)
+        print(len(rmsds))
+        print(len(scores))
         plt.plot(rmsds, scores, parsed_args.style)
+    def do_plot_dir_neighbors(self, arg):
+        parser = argparse.ArgumentParser()
+        parser.add_argument('in_dir',
+                            action='store')
+        parser.add_argument('start_i',
+                            type=int,
+                            action='store')
+        parser.add_argument('end_i',
+                            type=int,
+                            action='store')
+        parser.add_argument('--params',
+                            dest='params',
+                            action='store',
+                            nargs='*',
+                            default=None)
+        parsed_args = parser.parse_args(arg.split())
+        params = None
+        if parsed_args.params:
+            params = []
+            for param in parsed_args.params:
+                if param.endswith('.params'):
+                    params.append(param)
+                else:
+                    params.append(param+'.params')
+        filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        matrices = []
+        for filename in filenames_in_in_dir:
+            matrices.append(
+                self.data_buffer.get_pdb_neighbors_from_path(
+                    os.path.join(parsed_args.in_dir, filename),
+                    params=params))
+        n_matrices = float(len(matrices))
+        avg_matrix = []
+        for x in range(parsed_args.start_i-1,parsed_args.end_i):
+            avg_matrix.append([])
+            for y in range(parsed_args.start_i-1,parsed_args.end_i):
+                avg_matrix[-1].append(
+                    functools.reduce(
+                        operator.add,
+                        [m[x][y] for m in matrices if len(m)])/n_matrices)
+        plt.imshow(avg_matrix, cmap='hot', interpolation='nearest')
+        axes = plt.gca()
+        xticklabels = axes.get_xticklabels()
+        newxticklabels = []
+        for label in xticklabels:
+            try:
+                n = int(label.get_text)
+                n += parsed_args.start_i
+                newlabel = label
+                newlabel.set_text(str(n))
+                newxticklabels.append(newlabel)
+            except ValueError:
+                newxticklabels.append(label)
+        axes.set_xticklabels(newxticklabels)
+        yticklabels = axes.get_yticklabels()
+        newyticklabels = []
+        for label in yticklabels:
+            try:
+                n = int(label.get_text)
+                n += parsed_args.start_i
+                newlabel = label
+                newlabel.set_text(str(n))
+                newyticklabels.append(newlabel)
+            except ValueError:
+                newyticklabels.append(label)
+        axes.set_yticklabels(newyticklabels)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -757,6 +858,8 @@ if __name__ == "__main__":
     OURCMDLINE.settings['continuous_mode'] = parsed_args.continuousp
     OURCMDLINE.settings['plotting'] = not parsed_args.continuousp
     if parsed_args.script is not None:
-        OURCMDLINE.do_playback(parsed_args.script)
-    if not parsed_args.backgroundp:
-        OurCmdLine().cmdloop()
+        with open(parsed_args.script) as f:
+            OURCMDLINE.cmdqueue.extend(f.read().splitlines())
+    if parsed_args.backgroundp:
+        OURCMDLINE.cmdqueue.extend('quit')
+    OURCMDLINE.cmdloop()
