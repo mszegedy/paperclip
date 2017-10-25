@@ -353,8 +353,7 @@ class PDBDataBuffer():
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
         else:
             pose = pr.Pose()
-            pose = pr.rosetta.core.import_pose.pose_from_pdbstring(
-                       pose, contents)
+            pr.rosetta.core.import_pose.pose_from_pdbstring(pose, contents)
         indices = self.get_score_indices_list()
         set_in_dict_with_list(self.data[content_key][1],
                               indices, PYROSETTA_ENV.scorefxn(pose))
@@ -466,7 +465,6 @@ class PDBDataBuffer():
     def get_pdb_neighbors_from_path(self, path, bound=None, params=None):
         contents, content_key, path, mtime = \
             self.get_pdb_file_essentials(path)
-        print(path)
         self.update_pdb_neighbors(path, bound, params)
         return self.data[content_key][3][str(bound)]
 
@@ -533,7 +531,7 @@ class OurCmdLine(cmd.Cmd):
 
     ## Shell stuff
     def do_shell(self, arg):
-        """Call a shell command:  shell cd dir  |  !cd dir"""
+        """Call a shell command:  shell echo 'Hello'  |  !echo 'Hello'"""
         os.system(arg)
     def do_cd(self, arg):
         """Change the current working directory:  cd dir"""
