@@ -809,7 +809,7 @@ against their energy score:
         newxticklabels = []
         for label in xticklabels:
             try:
-                n = int(label.get_text)
+                n = int(label.get_text())
                 n += parsed_args.start_i
                 newlabel = label
                 newlabel.set_text(str(n))
@@ -821,7 +821,7 @@ against their energy score:
         newyticklabels = []
         for label in yticklabels:
             try:
-                n = int(label.get_text)
+                n = int(label.get_text())
                 n += parsed_args.start_i
                 newlabel = label
                 newlabel.set_text(str(n))
@@ -861,5 +861,5 @@ if __name__ == "__main__":
         with open(parsed_args.script) as f:
             OURCMDLINE.cmdqueue.extend(f.read().splitlines())
     if parsed_args.backgroundp:
-        OURCMDLINE.cmdqueue.extend('quit')
+        OURCMDLINE.cmdqueue.extend(['quit'])
     OURCMDLINE.cmdloop()
