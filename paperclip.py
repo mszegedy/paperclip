@@ -391,16 +391,16 @@ class PDBDataBuffer():
                                                             params)
         else:
             pose_lhs = pr.Pose()
-            pose_lhs = pr.rosetta.core.import_pose.pose_from_pdbstring(
-                           pose, contents_lhs)
+            pr.rosetta.core.import_pose.pose_from_pdbstring(pose_lhs,
+                                                            contents_lhs)
         pose_rhs = None
         if params:
             pose_rhs = mpre.pose_from_pdbstring_with_params(contents_rhs,
                                                             params)
         else:
             pose_rhs = pr.Pose()
-            pose_rhs = pr.rosetta.core.import_pose.pose_from_pdbstring(
-                           pose, contents_rhs)
+            pr.rosetta.core.import_pose.pose_from_pdbstring(pose_rhs,
+                                                            contents_rhs)
         self.data[content_key_lhs][2].setdefault(rmsd_type,{})
         self.data[content_key_lhs][2][rmsd_type].setdefault(content_key_rhs,{})
         self.data[content_key_lhs][2][rmsd_type][content_key_rhs] = \
@@ -442,8 +442,7 @@ class PDBDataBuffer():
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
         else:
             pose = pr.Pose()
-            pose = pr.rosetta.core.import_pose.pose_from_pdbstring(
-                       pose, contents)
+            pr.rosetta.core.import_pose.pose_from_pdbstring(pose, contents)
         result = []
         n_residues = pose.size()
         for i in range(1,n_residues+1):
@@ -467,6 +466,7 @@ class PDBDataBuffer():
     def get_pdb_neighbors_from_path(self, path, bound=None, params=None):
         contents, content_key, path, mtime = \
             self.get_pdb_file_essentials(path)
+        print(path)
         self.update_pdb_neighbors(path, bound, params)
         return self.data[content_key][3][str(bound)]
 
@@ -803,28 +803,9 @@ against their energy score:
                     functools.reduce(
                         operator.add,
                         [m[x][y] for m in matrices if len(m)])/n_matrices)
-        plt.imshow(avg_matrix, cmap='hot', interpolation='nearest')
-        axes = plt.gca()
-        xticklabels = axes.get_xticklabels()
-        newxticklabels = []
-        for label in xticklabels:
-            try:
-                n = int(label.get_text())
-                n += parsed_args.start_i
-                newxticklabels.append(str(n))
-            except ValueError:
-                newxticklabels.append(label.get_text())
-        axes.set_xticklabels(newxticklabels)
-        yticklabels = axes.get_yticklabels()
-        newyticklabels = []
-        for label in yticklabels:
-            try:
-                n = int(label.get_text())
-                n += parsed_args.start_i
-                newyticklabels.append(str(n))
-            except ValueError:
-                newyticklabels.append(label.get_text())
-        axes.set_yticklabels(newyticklabels)
+        plt.imshow(avg_matrix, cmap='hot', interpolation='nearest',
+                   extent=[parsed_args.start_i, parsed_args.end_i,
+                           parsed_args.end_i, parsed_args.start_i])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
