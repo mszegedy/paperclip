@@ -811,11 +811,9 @@ against their energy score:
             try:
                 n = int(label.get_text())
                 n += parsed_args.start_i
-                newlabel = label
-                newlabel.set_text(str(n))
-                newxticklabels.append(newlabel)
+                newxticklabels.append(str(n))
             except ValueError:
-                newxticklabels.append(label)
+                newxticklabels.append(label.get_text())
         axes.set_xticklabels(newxticklabels)
         yticklabels = axes.get_yticklabels()
         newyticklabels = []
@@ -823,11 +821,9 @@ against their energy score:
             try:
                 n = int(label.get_text())
                 n += parsed_args.start_i
-                newlabel = label
-                newlabel.set_text(str(n))
-                newyticklabels.append(newlabel)
+                newyticklabels.append(str(n))
             except ValueError:
-                newyticklabels.append(label)
+                newyticklabels.append(label.get_text())
         axes.set_yticklabels(newyticklabels)
 
 if __name__ == "__main__":
