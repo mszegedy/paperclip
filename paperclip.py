@@ -34,22 +34,6 @@ from pyrosetta.rosetta.core.scoring import all_atom_rmsd
 import mszpyrosettaextension as mpre
 
 PYROSETTA_ENV = None
-ROSETTA_WEIGHT_NAMES = ['fa_atr',
-                        'fa_rep',
-                        'fa_sol',
-                        'fa_intra_rep',
-                        'fa_elec',
-                        'pro_close',
-                        'hbond_sr_bb',
-                        'hbond_lr_bb',
-                        'hbond_bb_sc',
-                        'hbond_sc',
-                        'dslf_fa13',
-                        'rama',
-                        'omega',
-                        'fa_dun',
-                        'p_aa_pp',
-                        'ref']
 ROSETTA_RMSD_TYPES = ['gdtsc',
                       'CA_rmsd',
                       'CA_gdtmm',
