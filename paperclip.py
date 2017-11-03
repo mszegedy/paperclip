@@ -212,7 +212,7 @@ class PDBDataBuffer():
     { pdb_file_path : { 'mtime' : mtime_at_last_hashing,
                         'hash'  : contents_hash } }
     self.cache_paths:
-    { cache_file_path : mtime_at_last_access }
+    { cache_file_dir_path : mtime_at_last_access }
     """
     ## Core functionality
     def __init__(self):
@@ -279,31 +279,30 @@ class PDBDataBuffer():
         """Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
         file paths, it has just filenames."""
-        absdir_path = os.path.abspath(dirpath)
+        absdirpath = os.path.abspath(dirpath)
         try:
             cache_path = os.path.join(absdirpath, '.paperclip_cache')
             diskmtime = os.path.getmtime(cache_path)
             ourmtime = self.cache_paths.setdefault(absdirpath, 0)
             if diskmtime > ourmtime:
-                retrieved_data = None
+                retrieved = None
                 with open(cache_path, 'r') as cache_file:
                     try:
-                        retrieved_data = json.loads(cache_file.read())
+                        retrieved = json.loads(cache_file.read())
                     except ValueError:
                         raise FileNotFoundError('No cache file found.')
-                if retrieved_data:
-                    for content_key, content_value in retrieved_data.items():
-                        paths = content_value[0]
-                        for path in list(paths.keys()):
-                            retrieved_data[content_key]\
-                                          [0]\
-                                          [os.path.abspath(
-                                              os.path.join(absdirpath,
-                                                           path))] = \
-                                retrieved_data[content_key][0][path]
-                            del retrieved_data[content_key][0][path]
-                    self.merge_new_data(retrieved_data)
-                self.cache_paths[absdirpath] = diskmtime
+                if retrieved:
+                    diskdata, disk_pdb_info = retrieved
+                    for content_key, content in diskdata.items():
+                        for data_name, data_keys in content.items():
+                            for data_key, data in data_keys.items():
+                                self.data[content_key] \
+                                         [data_name] \
+                                         [data_key] = data
+                    for pdb_name, pdb_info in disk_pdb_info.items():
+                        self.pdb_paths[os.path.join(absdirpath, pdb_name)] = \
+                            pdb_info
+            self.cache_paths[absdirpath] = diskmtime
         except FileNotFoundError:
             pass
     def update_caches(self):
@@ -313,8 +312,8 @@ class PDBDataBuffer():
             dir_path = os.path.dirname(pdb_path)
             dir_paths[dir_path] = {}
         for dir_path in list(dir_paths.keys()):
-            cache_filename = os.path.join(dir_path, '.paperclip_cache')
-            with open(cache_filename, 'w+') as cache_file:
+            cache_path = os.path.join(dir_path, '.paperclip_cache')
+            with open(cache_path, 'w+') as cache_file:
                 while True:
                     try:
                         fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -329,6 +328,7 @@ class PDBDataBuffer():
                     new_data_dict[ourhash] = self.data[ourhash]
                 cache_file.write(json.dumps([new_data_dict,
                                              dir_paths[dir_path]]))
+                self.cache_paths[dir_path] = os.path.getmtime(cache_path)
                 fcntl.flock(cache_file, fcntl.LOCK_UN)
     def get_pdb_file_info(self, path):
         """Returns an object that in theory contains the absolute path, mtime, contents
