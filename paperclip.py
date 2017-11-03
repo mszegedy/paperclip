@@ -125,35 +125,6 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             for m \
             in [stripper.search(path) for path in path_list] \
             if m is not None]
-def recursive_dict_merge(a, b, favor_a_p=False):
-    """Merges two dicts recursively, favoring the second over the first unless
-    otherwise specified."""
-    merged = a
-    for key in b:
-        if key in merged:
-            if isinstance(merged[key], dict) and \
-               isinstance(b[key], dict):
-                merged[key] = recursive_dict_merge(merged[key], b[key],
-                                                   favor_a_p)
-            elif not isinstance(merged[key], dict) and \
-                 not isinstance(b[key], dict):
-                merged[key] = a[key] if favor_a_p else b[key]
-            else:
-                raise ValueError('Incompatible types found in dict'
-                                 'merge.')
-        else:
-            merged[key] = b[key]
-    return merged
-def get_from_dict_with_list(d, l):
-    """Indexes into a multi-layered dict with a list of keywords, one for each
-    layer."""
-    return functools.reduce(operator.getitem, l, d)
-def set_in_dict_with_list(d, l, value):
-    """Sets a value inside a multi-layered dict, indexed with a list of
-    keywords, one for each layer."""
-    for key in l[:-1]:
-        d = d.setdefault(key, {})
-    d[l[-1]] = value
 
 ### Housekeeping classes
 
@@ -251,30 +222,6 @@ class PDBDataBuffer():
                         self_.update_caches()
                     return file_data[accessor_tuple]
             setattr(self, 'get_'+data_name, accessor)
-
-    def merge_new_data(self, new_data):
-        """Merges a data dict for a PDBDataBuffer into this one. The new dict
-        takes precence over the old one."""
-        for content_key in new_data:
-            if content_key not in self.data.keys():
-                self.data[content_key] = new_data[content_key]
-            else:
-                for index, entry in enumerate(new_data[content_key]):
-                    if index == 0:
-                        for path in entry:
-                            try:
-                                our_mtime = self.data[content_key][0][path]
-                                new_mtime = entry[path]
-                                newest_mtime = \
-                                    our_mtime if our_mtime > new_mtime \
-                                    else new_mtime
-                                self.data[content_key][0][path] = newest_mtime
-                            except KeyError:
-                                self.data[content_key][0][path] = entry[path]
-                    else:
-                        self.data[content_key][index] = \
-                            recursive_dict_merge(self.data[content_key][index],
-                                                 entry)
     def retrieve_data_from_cache(self, dirpath):
         """Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
