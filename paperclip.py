@@ -15,13 +15,15 @@ interest. Most plotting commands are based on Matlab commands.
 
 ## Python Standard Library
 import re
+import types
 import functools, operator
+import pickle
 import hashlib
 import argparse, os, time
 import subprocess
-import json
 import cmd
 import sys
+import ast
 import fcntl
 ## Other stuff
 import timeout_decorator
@@ -30,7 +32,6 @@ import matplotlib
 matplotlib.use("Agg") # otherwise lack of display breaks program
 import matplotlib.pyplot as plt
 import pyrosetta as pr
-from pyrosetta.rosetta.core.scoring import all_atom_rmsd
 import mszpyrosettaextension as mpre
 
 PYROSETTA_ENV = None
@@ -46,6 +47,7 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
 
 def needs_pr_init(f):
     """Makes sure PyRosetta gets initialized before f is called."""
+    @functools.wraps(f)
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
         if not PYROSETTA_ENV.initp:
@@ -58,6 +60,7 @@ def needs_pr_scorefxn(f):
     """Makes sure the scorefxn exists before f is called. (In order for the
     scorefxn to exist, pr.init() needs to have been called, so @needs_pr_init
     is unnecessary in front of this.)"""
+    @functools.wraps(f)
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
         if PYROSETTA_ENV.scorefxn is None:
@@ -67,6 +70,7 @@ def needs_pr_scorefxn(f):
     return decorated
 def times_out(f):
     """Makes a function time out after it hits self.timelimit."""
+    @functools.wraps(f)
     def decorated(slf, *args, **kwargs):
         if slf.timelimit:
             try:
@@ -80,6 +84,7 @@ def times_out(f):
 def continuous(f):
     """Makes a function in OurCmdLine repeat forever when continuous mode is
     enabled, and decorates it with times_out."""
+    @functools.wraps(f)
     @times_out
     def decorated(slf, *args, **kwargs):
         if slf.settings['continuous_mode']:
@@ -109,6 +114,40 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             for m \
             in [stripper.search(path) for path in path_list] \
             if m is not None]
+
+def make_PDBDataBuffer_accessor(data_name):
+    """Create an accessor function for a PDBDataBuffer data type."""
+    # Python duck typing philosophy says we shouldn't do any explicit
+    # checking of the thing stored at the attribute, but in any case,
+    # it should be a function that takes a pdb_contents string as its
+    # first argument, a params list as a keyword argument, and a bunch
+    # of hashable arguments as the rest of its arguments.
+    # TODO: Fix this so that you don't need to pass the scorefxn hash
+    #       to get_score().
+    # TODO: Fix this so that calculate_rmsd() can take a contents
+    #       hash, rather than a path.
+    def accessor(self_, file_path, *args, params=None, **kwargs):
+        self_.retrieve_data_from_cache(os.path.dirname(file_path))
+        file_info = self_.get_pdb_file_info(file_path)
+        file_data = self_.data.setdefault(file_info.hash, {}) \
+                              .setdefault(data_name, {})
+        kwargs_args_list = list(kwargs.keys())
+        kwargs_args_list.sort()
+        accessor_tuple = tuple(args) + \
+                         tuple(kwargs[arg] for arg in kwargs_args_list)
+        try:
+            return file_data[accessor_tuple]
+        except KeyError:
+            file_data[accessor_tuple] = \
+                getattr(self_, 'calculate_'+data_name) \
+                    (file_info.get_contents(), *args,
+                     params=params, **kwargs)
+            if self_.cachingp:
+                self_.update_caches()
+            return file_data[accessor_tuple]
+    accessor.__name__ = 'get_'+data_name
+    accessor.__doc__  = 'Call calculate_'+data_name+'() with caching magic.'
+    return accessor
 
 ### Housekeeping classes
 
@@ -180,33 +219,10 @@ class PDBDataBuffer():
         for data_name in (attribute_name[10:] \
                           for attribute_name in attribute_names \
                           if attribute_name.startswith('calculate_')):
-            # Python duck typing philosophy says we shouldn't do any explicit
-            # checking of the thing stored at the attribute, but in any case,
-            # it should be a function that takes a pdb_contents string as its
-            # first argument, a params list as a keyword argument, and a bunch
-            # of hashable arguments as the rest of its arguments.
-            def accessor(self_, file_path, params=None, *args, **kwargs):
-                self.retrieve_data_from_cache(os.path.dirname(file_path))
-                file_info = self_.get_pdb_info(file_path)
-                file_data = self_.data.setdefault(file_info.hash, {}) \
-                                     .setdefault(data_name, {})
-                kwargs_args_list = list(kwargs.keys())
-                kwargs_args_list.sort()
-                accessor_tuple = tuple(args) + \
-                                 tuple([kwargs[arg] \
-                                        for arg in kwargs_args_list])
-                try:
-                    return file_data[accessor_tuple]
-                except KeyError:
-                    file_data[accessor_tuple] = \
-                        getattr(self_, 'calculate_'+data_name) \
-                            (file_info.get_contents(), params=params, *args,
-                             **kwargs)
-                    if self_.cachingp:
-                        self_.update_caches()
-                    return file_data[accessor_tuple]
-            setattr(self, 'get_'+data_name, accessor)
-    def retrieve_data_from_cache(self, dirpath):
+            setattr(self, 'get_'+data_name,
+                    types.MethodType(make_PDBDataBuffer_accessor(data_name),
+                                     self))
+    def retrieve_data_from_cache(self, dirpath, cache_fd=None):
         """Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
         file paths, it has just filenames."""
@@ -217,22 +233,34 @@ class PDBDataBuffer():
             ourmtime = self.cache_paths.setdefault(absdirpath, 0)
             if diskmtime > ourmtime:
                 retrieved = None
-                with open(cache_path, 'r') as cache_file:
-                    try:
-                        retrieved = json.loads(cache_file.read())
-                    except ValueError:
-                        raise FileNotFoundError('No cache file found.')
+                if cache_fd is not None:
+                    pos = cache_fd.tell()
+                    cache_fd.seek(0)
+                    retrieved = pickle.load(cache_fd)
+                    cache_fd.seek(pos)
+                else:
+                    with open(cache_path, 'rb') as cache_file:
+                        retrieved = pickle.load(cache_file)
                 if retrieved:
                     diskdata, disk_pdb_info = retrieved
                     for content_key, content in diskdata.items():
                         for data_name, data_keys in content.items():
                             for data_key, data in data_keys.items():
+                                self.data.setdefault(content_key,{})
+                                self.data[content_key].setdefault(data_name,{})
                                 self.data[content_key] \
                                          [data_name] \
                                          [data_key] = data
-                    for pdb_name, pdb_info in disk_pdb_info.items():
-                        self.pdb_paths[os.path.join(absdirpath, pdb_name)] = \
-                            pdb_info
+                    for pdb_name, pdb_info_pair in disk_pdb_info.items():
+                        pdb_path = os.path.join(absdirpath, pdb_name)
+                        ourpdb_info_pair = self.pdb_paths.get(pdb_path, None)
+                        ourpdbmtime = None
+                        if ourpdb_info_pair is not None:
+                            ourpdbmtime = ourpdb_info_pair['mtime']
+                        else:
+                            ourpdbmtime = 0
+                        if pdb_info_pair['mtime'] > ourpdbmtime:
+                            self.pdb_paths[pdb_path] = pdb_info_pair
             self.cache_paths[absdirpath] = diskmtime
         except FileNotFoundError:
             pass
@@ -244,21 +272,34 @@ class PDBDataBuffer():
             dir_paths[dir_path] = {}
         for dir_path in list(dir_paths.keys()):
             cache_path = os.path.join(dir_path, '.paperclip_cache')
-            with open(cache_path, 'w+') as cache_file:
-                while True:
-                    try:
-                        fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        time.sleep(0.05)
-                self.retrieve_data_from_cache(dir_path)
+            try:
+                with open(cache_path, 'rb') as cache_file:
+                    while True:
+                        try:
+                            fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            time.sleep(0.05)
+                    self.retrieve_data_from_cache(dir_path, cache_fd=cache_file)
+            except FileNotFoundError:
+                with open(cache_path, 'wb') as cache_file:
+                    while True:
+                        try:
+                            fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            time.sleep(0.05)
+            with open(cache_path, 'wb') as cache_file:
                 new_data_dict = {}
                 for pdb_path in self.pdb_paths.keys():
                     dir_path, pdb_name = os.path.split(pdb_path)
                     dir_paths[dir_path][pdb_name] = self.pdb_paths[pdb_path]
                     ourhash = self.pdb_paths[pdb_path]['hash']
-                    new_data_dict[ourhash] = self.data[ourhash]
-                cache_file.write(json.dumps([new_data_dict,
-                                             dir_paths[dir_path]]))
+                    try:
+                        new_data_dict[ourhash] = self.data[ourhash]
+                    except KeyError:
+                        pass
+                pickle.dump([new_data_dict, dir_paths[dir_path]], cache_file)
                 self.cache_paths[dir_path] = os.path.getmtime(cache_path)
                 fcntl.flock(cache_file, fcntl.LOCK_UN)
     def get_pdb_file_info(self, path):
@@ -281,7 +322,8 @@ class PDBDataBuffer():
             def update(self_, mtime = None):
                 diskmtime = mtime or os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.contents is None:
-                    with open(path, 'r') as pdb_file:
+                    print(self_.path)
+                    with open(self_.path, 'r') as pdb_file:
                         self_.contents = pdb_file.read()
                     hash_fun = hashlib.md5()
                     hash_fun.update(self_.contents.encode())
@@ -308,22 +350,22 @@ class PDBDataBuffer():
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
     # is just the same thing but with all the buffer/caching magic attached,
     # and with the contents arg replaced with a path arg.
-    @needs_pr_init
+    #@needs_pr_init
     def calculate_score(self, contents, scorefxn_hash, params=None):
         """Calculates the score of a protein based on the provided contents of its PDB
         file. scorefxn_hash is not used inside the calculation, but is used for
         indexing into the buffer.
         """
         global PYROSETTA_ENV
-        pose = self.get_pdb_file_pose(contents)
+        pose = self.get_pdb_contents_pose(contents, params)
         return PYROSETTA_ENV.scorefxn(pose)
-    @needs_pr_init
+    #@needs_pr_init
     def calculate_rmsd(self, lhs_contents, rhs_path, rmsd_type,
                                       params=None):
         """Calculates the RMSD of two proteins from each other and stores
         it, without assuming commutativity."""
         pose_lhs = self.get_pdb_contents_pose(lhs_contents, params=params)
-        pose_rhs = self.get_pdb_contents_pose(self.get_pdb_info(rhs_path) \
+        pose_rhs = self.get_pdb_contents_pose(self.get_pdb_file_info(rhs_path) \
                                                   .get_contents(),
                                               params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
@@ -355,7 +397,6 @@ class OurCmdLine(cmd.Cmd):
     settings = {'calculation': True,
                 'caching': True,
                 'plotting': True,
-                'recalculate_energies': True,
                 'continuous_mode': False}
     timelimit = 0
     ## The two buffers:
@@ -449,10 +490,7 @@ Available settings are:
       the command 'set_timelimit'.)
   plotting: Whether to actually output plots, or to just perform and cache the
       calculations for them. Disabling both this and 'calculation' makes most
-      analysis and plotting commands do nothing.
-  recalculate_energies: Recalculate energies found in cache when plotting. This
-      may be necessary if they were computed with a custom scorefxn that wasn't
-      recorded in the cache file."""
+      analysis and plotting commands do nothing."""
         args = arg.split()
         varname  = None
         varvalue = None
@@ -495,7 +533,10 @@ Available settings are:
     def do_get_timelimit(self, arg):
         """Print the current time limit set on analysis commands:
   get_timelimit"""
-        print(str(self.timelimit)+' seconds')
+        if self.timelimit == 0:
+            print('No timelimit')
+        else:
+            print(str(self.timelimit)+' seconds')
     def do_set_timelimit(self, arg):
         """Set a time limit on analysis commands, in seconds. Leave as 0 to let
 commands run indefinitely:
@@ -587,7 +628,7 @@ commands run indefinitely:
     @needs_pr_scorefxn
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
-against their energy score:
+against their energy score, optionally specifying an upper bound on score:
     plot_dir_rmsd_vs_score indir infile.pdb  |
     plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
     plot_dir_rmsd_vs_score indir infile.pdb 4.6"""
@@ -598,9 +639,10 @@ against their energy score:
         parser.add_argument('in_file',
                             action='store')
         parser.add_argument('bound',
+                            type=float,
                             action='store',
                             nargs='?',
-                            default=None)
+                            default=0)
         parser.add_argument('--style',
                             dest='style',
                             action='store',
@@ -623,21 +665,15 @@ against their energy score:
         data = ((self.data_buffer.get_rmsd(
                      parsed_args.in_file,
                      os.path.join(parsed_args.in_dir, filename),
-                     'all_atom_rmsd', params=params),
+                     'all_atom_rmsd',
+                     params=params),
                  self.data_buffer.get_score(
                      os.path.join(parsed_args.in_dir, filename),
                      PYROSETTA_ENV.get_scorefxn_hash(),
                      params=params)) \
                 for filename in filenames_in_in_dir \
                 if filename.endswith('.pdb'))
-        data = (datapoint for datapoint in data \
-                if datapoint[1] < 0)
-        rmsds  = [datapoint[0] for datapoint in data]
-        scores = [datapoint[1] for datapoint in data]
-        print(rmsds)
-        print(scores)
-        print(len(rmsds))
-        print(len(scores))
+        rmsds,scores = zip(*(datapoint for datapoint in data if datapoint[1] < 0))
         plt.plot(rmsds, scores, parsed_args.style)
     def do_plot_dir_neighbors(self, arg):
         parser = argparse.ArgumentParser()
@@ -666,10 +702,11 @@ against their energy score:
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
         matrices = []
         for filename in filenames_in_in_dir:
-            matrices.append(
-                self.data_buffer.get_neighbors(
-                    os.path.join(parsed_args.in_dir, filename),
-                    params=params))
+            if filename.endswith('.pdb'):
+                matrices.append(
+                    self.data_buffer.get_neighbors(
+                        os.path.join(parsed_args.in_dir, filename),
+                        params=params))
         def m_valid_p(m, minsize):
             try:
                 return len(m) >= minsize and \
