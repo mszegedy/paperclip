@@ -71,15 +71,15 @@ def needs_pr_scorefxn(f):
 def times_out(f):
     """Makes a function time out after it hits self.timelimit."""
     @functools.wraps(f)
-    def decorated(slf, *args, **kwargs):
-        if slf.timelimit:
+    def decorated(self_, *args, **kwargs):
+        if self_.timelimit:
             try:
                 return timeout_decorator\
-                    .timeout(slf.timelimit)(f)(slf, *args, **kwargs)
+                    .timeout(self_.timelimit)(f)(self_, *args, **kwargs)
             except timeout_decorator.TimeoutError:
                 print('Timed out.')
         else:
-            return f(slf, *args, **kwargs)
+            return f(self_, *args, **kwargs)
     return decorated
 def continuous(f):
     """Makes a function in OurCmdLine repeat forever when continuous mode is
@@ -322,7 +322,6 @@ class PDBDataBuffer():
             def update(self_, mtime = None):
                 diskmtime = mtime or os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.contents is None:
-                    print(self_.path)
                     with open(self_.path, 'r') as pdb_file:
                         self_.contents = pdb_file.read()
                     hash_fun = hashlib.md5()
@@ -350,7 +349,7 @@ class PDBDataBuffer():
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
     # is just the same thing but with all the buffer/caching magic attached,
     # and with the contents arg replaced with a path arg.
-    #@needs_pr_init
+    @needs_pr_init
     def calculate_score(self, contents, scorefxn_hash, params=None):
         """Calculates the score of a protein based on the provided contents of its PDB
         file. scorefxn_hash is not used inside the calculation, but is used for
@@ -359,7 +358,7 @@ class PDBDataBuffer():
         global PYROSETTA_ENV
         pose = self.get_pdb_contents_pose(contents, params)
         return PYROSETTA_ENV.scorefxn(pose)
-    #@needs_pr_init
+    @needs_pr_init
     def calculate_rmsd(self, lhs_contents, rhs_path, rmsd_type,
                                       params=None):
         """Calculates the RMSD of two proteins from each other and stores
@@ -381,8 +380,7 @@ class PDBDataBuffer():
             result.append([])
             for j in range(1,n_residues+1):
                 result[-1].append(
-                    # int because it takes up less space in the json
-                    int(mpre.res_neighbors_p(pose,i,j,coarsep=coarsep,bound=bound)))
+                    mpre.res_neighbors_p(pose,i,j,coarsep=coarsep,bound=bound))
         return result
 
 ### Main class
@@ -623,9 +621,12 @@ commands run indefinitely:
         elif len(args) == 1:
             plt.subplot(int(args[0]))
     def do_save_plot(self, arg):
-        """Save the plot currently in the plot buffer:  save_plot"""
-        plt.savefig(arg, format=arg.split('.')[-1].lower())
-    @needs_pr_scorefxn
+        """Save the plot currently in the plot buffer:  save_plot name.eps"""
+        if arg:
+            plt.savefig(arg, format=arg.split('.')[-1].lower())
+        else:
+            print('Your plot needs a name.')
+    @continuous
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
 against their energy score, optionally specifying an upper bound on score:
@@ -675,6 +676,7 @@ against their energy score, optionally specifying an upper bound on score:
                 if filename.endswith('.pdb'))
         rmsds,scores = zip(*(datapoint for datapoint in data if datapoint[1] < 0))
         plt.plot(rmsds, scores, parsed_args.style)
+    @continuous
     def do_plot_dir_neighbors(self, arg):
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
