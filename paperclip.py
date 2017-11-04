@@ -623,6 +623,7 @@ commands run indefinitely:
     def do_save_plot(self, arg):
         """Save the plot currently in the plot buffer:  save_plot name.eps"""
         if arg:
+            plt.tight_layout()
             plt.savefig(arg, format=arg.split('.')[-1].lower())
         else:
             print('Your plot needs a name.')
