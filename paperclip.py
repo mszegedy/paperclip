@@ -17,16 +17,15 @@ interest. Most plotting commands are based on Matlab commands.
 import re
 import types
 import functools, operator
-import pickle
 import hashlib
 import argparse, os, time
 import subprocess
 import cmd
 import sys
 import ast
-import fcntl
 ## Other stuff
 import timeout_decorator
+from mpi4py import MPI
 import numpy as np
 import matplotlib
 matplotlib.use("Agg") # otherwise lack of display breaks program
@@ -34,6 +33,10 @@ import matplotlib.pyplot as plt
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
 
+MPICOMM   = MPI.COMM_WORLD
+MPIRANK   = MPICOMM.Get_rank()
+MPISIZE   = MPICOMM.Get_size()
+MPISTATUS = MPICOMM.Status()
 PYROSETTA_ENV = None
 ROSETTA_RMSD_TYPES = ['gdtsc',
                       'CA_rmsd',
@@ -146,8 +149,113 @@ def make_PDBDataBuffer_accessor(data_name):
                 self_.update_caches()
             return file_data[accessor_tuple]
     accessor.__name__ = 'get_'+data_name
-    accessor.__doc__  = 'Call calculate_'+data_name+'() with caching magic.'
+    accessor.__doc__  = 'Call calculate_'+data_name+ \
+                        '() on a file path with caching magic.'
     return accessor
+
+def make_PDBDataBuffer_gatherer(data_name):
+    """Make an accessor for a PDBDataBuffer that concurrently operates on a
+    list of filenames instead of a single filename."""
+    def gatherer(self_, file_list, *args, params=None, **kwargs):
+        abs_file_list = [os.path.abspath) for path in file_list]
+        if MPISIZE == 1:
+            return [getattr(self_, 'get_'+data_name) \
+                        (file_path, *args,
+                         params=params, **kwargs) \
+                    for file_path in abs_file_list]
+        else:
+            # getting this instead of a path makes a worker thread die:
+            QUIT_GATHERING_SIGNAL = -1
+            READY_TAG = 0 # used once by worker, to sync startup
+            DONE_TAG  = 1 # used by worker to pass result and request new job
+            WORK_TAG  = 2 # used by master to pass next path to worker
+            # will be used to index into self_.data to retrieve final result:
+            file_indices_dict = {}
+            for dirname in set((os.path.dirname(path) \
+                                for path in abs_file_list)):
+                self_.retrieve_data_from_cache(dirname)
+            if MPIRANK == 0:
+                current_file_index = 0
+                working_threads = MPISIZE-1
+                while True:
+                    result = MPICOMM.recv(source=MPI.ANY_SOURCE,
+                                          tag=MPI.ANY_TAG,
+                                          status=MPISTATUS)
+                    result_source = MPISTATUS.Get_source()
+                    result_tag    = MPISTATUS.Get_tag()
+                    if current_file_index < len(abs_file_list):
+                        MPI.send(abs_file_list[current_file_index],
+                                 dest=result_source, tag=WORK_TAG)
+                        current_file_index += 1
+                    if result_tag == DONE_TAG:
+                        # save the result
+                        file_info      = result[0]
+                        file_data      = result[1]
+                        accessor_tuple = result[2]
+                        self_.pdb_paths[file_info.path] = \
+                            {'mtime': file_info.mtime,
+                             'hash':  file_info.hash}
+                        self_.data.setdefault(file_info.hash, {}) \
+                                  .setdefault(data_name, {}) \
+                                  [accessor_tuple] = file_data
+                        self_.update_caches()
+                        file_indices_dict[file_info.path] = \
+                            (file_info.hash, data_name, accessor_tuple)
+                    if current_file_index >= len(abs_file_list):
+                        # mutually exclusive with the earlier send, so unless
+                        # the intervening code changes current_file_index or
+                        # abs_file_list for some dumb reason, this should
+                        # never cause an infinite hang
+                        MPICOMM.send(QUIT_GATHERING_SIGNAL,
+                                     dest=result_source, tag=WORK_TAG)
+                        working_threads -= 1
+                        if working_threads <= 0:
+                            break
+            else:
+                MPICOMM.send(None, dest=0, tag=READY_TAG)
+                while True:
+                    file_path = MPICOMM.recv(source=0, tag=WORK_TAG)
+                    if file_path == QUIT_GATHERING_SIGNAL:
+                        break
+                    # this is nearly a copy/paste of the accessor code, but
+                    # it stores some extra stuff and doesn't retrieve or write
+                    # any caches
+                    result_data = None
+                    file_info = self_.get_pdb_file_info(file_path)
+                    file_data = self_.data.setdefault(file_info.hash, {}) \
+                                          .setdefault(data_name, {})
+                    kwargs_args_list = list(kwargs.keys())
+                    kwargs_args_list.sort()
+                    accessor_tuple = tuple(args) + \
+                                     tuple(kwargs[arg] \
+                                           for arg in kwargs_args_list)
+                    try:
+                        result_data = file_data[accessor_tuple]
+                    except KeyError:
+                        result_data = \
+                            getattr(self_, 'calculate_'+data_name) \
+                                (file_info.get_contents(), *args,
+                                 params=params, **kwargs)
+                    # can't be sending an object with a pointer in it to an
+                    # object in a different thread (or can we? don't wanna
+                    # find out):
+                    file_data.pdb_paths_dict = None
+                    MPICOMM.send([file_data, result_data, accessor_tuple],
+                                 dest=0, tag=DONE_TAG)
+            # Synchronize everything that could have possibly changed:
+            self_.data = MPICOMM.bcast(self_.data, root=0)
+            self_.pdb_paths = MPICOMM.bcast(self_.pdb_paths, root=0)
+            self_.cache_paths = MPICOMM.bcast(self_.cache_paths, root=0)
+            file_indices_dict = MPICOMM.bcast(file_indices_dict, root=0)
+            # All threads should be on the same page at this point.
+            retlist = []
+            for path in abs_file_list:
+                indices = file_indices_dict[path]
+                retlist.append(self_.data[indices[0]][indices[1]][indices[2]])
+            return retlist
+    gatherer.__name__ = 'gather_'+data_name
+    gatherer.__doc__  = 'Call calculate_'+data_name+ \
+                        '() on a list of file paths with concurrency magic.'
 
 ### Housekeeping classes
 
@@ -210,7 +318,7 @@ class PDBDataBuffer():
     """
     ## Core functionality
     def __init__(self):
-        self.cachingp = True
+        self.cachingp = MPIRANK == 0
         self.data = {}
         self.pdb_paths = {}
         self.cache_paths = {}
@@ -221,6 +329,9 @@ class PDBDataBuffer():
                           if attribute_name.startswith('calculate_')):
             setattr(self, 'get_'+data_name,
                     types.MethodType(make_PDBDataBuffer_accessor(data_name),
+                                     self))
+            setattr(self, 'gather_'+data_name,
+                    types.MethodType(make_PDBDataBuffer_gatherer(data_name),
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
         """Retrieves data from a cache file of a directory. The data in the
@@ -236,12 +347,14 @@ class PDBDataBuffer():
                 if cache_fd is not None:
                     pos = cache_fd.tell()
                     cache_fd.seek(0)
-                    retrieved = pickle.load(cache_fd)
+                    retrieved = ast.literal_eval(cache_fd.read())
                     cache_fd.seek(pos)
                 else:
-                    with open(cache_path, 'rb') as cache_file:
-                        retrieved = pickle.load(cache_file)
-                if retrieved:
+                    with open(cache_path, 'r') as cache_file:
+                        retrieved = ast.literal_eval(cache_file.read())
+                    except FileNotFoundError:
+                        pass
+                if retrieved is not None:
                     diskdata, disk_pdb_info = retrieved
                     for content_key, content in diskdata.items():
                         for data_name, data_keys in content.items():
@@ -265,43 +378,33 @@ class PDBDataBuffer():
         except FileNotFoundError:
             pass
     def update_caches(self):
-        """Updates the caches for every directory the cache knows about."""
+        """Updates the caches for every directory the cache knows about. Note:
+        this method is not concurrency-safe. It is your job to write
+        concurrent code around it."""
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path = os.path.dirname(pdb_path)
             dir_paths[dir_path] = {}
         for dir_path in list(dir_paths.keys()):
             cache_path = os.path.join(dir_path, '.paperclip_cache')
+            cache_file = None
             try:
-                with open(cache_path, 'rb') as cache_file:
-                    while True:
-                        try:
-                            fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.05)
-                    self.retrieve_data_from_cache(dir_path, cache_fd=cache_file)
+                cache_file = open(cache_path, 'r+')
             except FileNotFoundError:
-                with open(cache_path, 'wb') as cache_file:
-                    while True:
-                        try:
-                            fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.05)
-            with open(cache_path, 'wb') as cache_file:
-                new_data_dict = {}
-                for pdb_path in self.pdb_paths.keys():
-                    dir_path, pdb_name = os.path.split(pdb_path)
-                    dir_paths[dir_path][pdb_name] = self.pdb_paths[pdb_path]
-                    ourhash = self.pdb_paths[pdb_path]['hash']
-                    try:
-                        new_data_dict[ourhash] = self.data[ourhash]
-                    except KeyError:
-                        pass
-                pickle.dump([new_data_dict, dir_paths[dir_path]], cache_file)
-                self.cache_paths[dir_path] = os.path.getmtime(cache_path)
-                fcntl.flock(cache_file, fcntl.LOCK_UN)
+                cache_file = open(cache_path, 'w+')
+            self.retrieve_data_from_cache(dir_path, cache_fd=cache_file)
+            new_data_dict = {}
+            for pdb_path in self.pdb_paths.keys():
+                dir_path, pdb_name = os.path.split(pdb_path)
+                dir_paths[dir_path][pdb_name] = self.pdb_paths[pdb_path]
+                ourhash = self.pdb_paths[pdb_path]['hash']
+                try:
+                    new_data_dict[ourhash] = self.data[ourhash]
+                except KeyError:
+                    pass
+            cache_file.write(str([new_data_dict, dir_paths[dir_path]]))
+            cache_file.close()
+            self.cache_paths[dir_path] = os.path.getmtime(cache_path)
     def get_pdb_file_info(self, path):
         """Returns an object that in theory contains the absolute path, mtime, contents
         hash, and maybe contents of a PDB. The first three are accessed
@@ -334,6 +437,14 @@ class PDBDataBuffer():
                 self_.update(mtime)
                 return self_.contents
         return PDBFileInfo(path)
+
+    ## Concurrency stuff
+    def set_cachingp(self, value):
+        # gotta make sure caching remains off for non rank 0 threads
+        if MPIRANK == 0:
+            self.cachingp = value
+
+    ## Auxiliary stuff
     @needs_pr_init
     def get_pdb_contents_pose(self, contents, params=None):
         """Returns a Pose of a given pdb file contents string."""
@@ -347,13 +458,16 @@ class PDBDataBuffer():
 
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
-    # is just the same thing but with all the buffer/caching magic attached,
-    # and with the contents arg replaced with a path arg.
+    # is just the same thing but with all the buffer/caching magic attached, 
+    # and with the contents arg replaced with a path arg. It also creates a
+    # gather_<whatever>, which outwardly looks like get_<whatever> operating on
+    # a list instead of a single filename, but is actually concurrently
+    # controlled if there are multiple processors available.
     @needs_pr_init
     def calculate_score(self, contents, scorefxn_hash, params=None):
-        """Calculates the score of a protein based on the provided contents of its PDB
-        file. scorefxn_hash is not used inside the calculation, but is used for
-        indexing into the buffer.
+        """Calculates the score of a protein based on the provided contents of
+        its PDB file. scorefxn_hash is not used inside the calculation, but is
+        used for indexing into the buffer.
         """
         global PYROSETTA_ENV
         pose = self.get_pdb_contents_pose(contents, params)
@@ -664,17 +778,22 @@ against their energy score, optionally specifying an upper bound on score:
                     params.append(param)
                 else:
                     params.append(param+'.params')
-        data = ((self.data_buffer.get_rmsd(
-                     parsed_args.in_file,
-                     os.path.join(parsed_args.in_dir, filename),
-                     'all_atom_rmsd',
-                     params=params),
-                 self.data_buffer.get_score(
-                     os.path.join(parsed_args.in_dir, filename),
-                     PYROSETTA_ENV.get_scorefxn_hash(),
-                     params=params)) \
-                for filename in filenames_in_in_dir \
-                if filename.endswith('.pdb'))
+        data = zip(self.data_buffer.gather_rmsd(
+                       (os.path.join(parsed_args.in_dir, filename) \
+                        for filename in filenames_in_in_dir \
+                        if filename.endswith('.pdb')),
+                       parsed_args.in_file,
+                       'all_atom_rmsd',
+                       params=params),
+                   self.data_buffer.gather_score(
+                       (os.path.join(parsed_args.in_dir, filename) \
+                        for filename in filenames_in_dir \
+                        if filename.endswith('.pdb')),
+                       PYROSETTA_ENV.get_scorefxn_hash(),
+                       params=params))
+        if not (self.settings['plotting'] and RANK == 0):
+            data = tuple(data)
+            return
         rmsds,scores = zip(*(datapoint for datapoint in data if datapoint[1] < 0))
         plt.plot(rmsds, scores, parsed_args.style)
     @continuous
@@ -703,13 +822,13 @@ against their energy score, optionally specifying an upper bound on score:
                 else:
                     params.append(param+'.params')
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
-        matrices = []
-        for filename in filenames_in_in_dir:
-            if filename.endswith('.pdb'):
-                matrices.append(
-                    self.data_buffer.get_neighbors(
-                        os.path.join(parsed_args.in_dir, filename),
-                        params=params))
+        matrices = self.data_buffer.gather_neighbors(
+                       (os.path.join(parsed_args.in_dir) \
+                        for filename in filenames_in_in_dir \
+                        if filename.endswith('.pdb')),
+                       params=params)
+        if not (self.settings['plotting'] and RANK == 0):
+            return
         def m_valid_p(m, minsize):
             try:
                 return len(m) >= minsize and \
