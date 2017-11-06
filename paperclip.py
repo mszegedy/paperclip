@@ -739,11 +739,12 @@ commands run indefinitely:
             plt.subplot(int(args[0]))
     def do_save_plot(self, arg):
         """Save the plot currently in the plot buffer:  save_plot name.eps"""
-        if arg:
-            plt.tight_layout()
-            plt.savefig(arg, format=arg.split('.')[-1].lower())
-        else:
-            print('Your plot needs a name.')
+        if MPIRANK == 0:
+            if arg:
+                plt.tight_layout()
+                plt.savefig(arg, format=arg.split('.')[-1].lower())
+            else:
+                print('Your plot needs a name.')
     @continuous
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
@@ -794,9 +795,6 @@ against their energy score, optionally specifying an upper bound on score:
                         if filename.endswith('.pdb')),
                        PYROSETTA_ENV.get_scorefxn_hash(),
                        params=params))
-        if not (self.settings['plotting'] and MPIRANK == 0):
-            data = tuple(data)
-            return
         rmsds,scores = zip(*(datapoint for datapoint in data if datapoint[1] < 0))
         plt.plot(rmsds, scores, parsed_args.style)
     @continuous
@@ -830,8 +828,6 @@ against their energy score, optionally specifying an upper bound on score:
                         for filename in filenames_in_in_dir \
                         if filename.endswith('.pdb')),
                        params=params)
-        if not (self.settings['plotting'] and MPIRANK == 0):
-            return
         def m_valid_p(m, minsize):
             try:
                 return len(m) >= minsize and \
