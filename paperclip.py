@@ -22,6 +22,7 @@ import subprocess
 import cmd
 import sys
 import ast
+import fcntl
 ## Other stuff
 import timeout_decorator
 from mpi4py import MPI
@@ -152,6 +153,7 @@ def make_PDBDataBuffer_accessor(data_name):
                 getattr(self_, 'calculate_'+data_name) \
                     (file_info.get_contents(), *args,
                      params=params, **kwargs)
+            self_.changed_dirs.add(os.path.dirname(file_path))
             self_.update_caches()
             return file_data[accessor_tuple]
     accessor.__name__ = 'get_'+data_name
@@ -192,8 +194,8 @@ def make_PDBDataBuffer_gatherer(data_name):
                               [accessor_tuple] = file_data
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_tuple)
+                    self_.changed_dirs.add(file_info_dict['path'])
                     DEBUG_OUT('just saved result for '+file_info_dict['path'])
-                    sys.stdout.flush()
                 for dirname in set((os.path.dirname(path) \
                                     for path in abs_file_list)):
                     DEBUG_OUT('retrieving caches for '+dirname)
@@ -336,11 +338,11 @@ class PDBDataBuffer():
     """
     ## Core functionality
     def __init__(self):
-        print('\n\nconstructing PDBDataBuffer\n\n')
         self.cachingp = MPIRANK == 0
         self.data = {}
         self.pdb_paths = {}
         self.cache_paths = {}
+        self.changed_dirs = set()
         # Monkey patch in the data accessors:
         attribute_names = dir(self)
         for data_name in (attribute_name[10:] \
@@ -373,7 +375,7 @@ class PDBDataBuffer():
                     cache_fd.seek(pos)
                 else:
                     try:
-                        DEBUG_OUT('opening and retieving cache at'+cache_path)
+                        DEBUG_OUT('opening and retrieving cache at'+cache_path)
                         with open(cache_path, 'r') as cache_file:
                             retrieved = ast.literal_eval(cache_file.read())
                         DEBUG_OUT('cache at '+cache_path+' retrieved')
@@ -393,7 +395,7 @@ class PDBDataBuffer():
                                          [data_name] \
                                          [data_key] = data
                     for pdb_name, pdb_info_pair in disk_pdb_info.items():
-                        print('saving info for '+pdb_name)
+                        DEBUG_OUT('saving info for '+pdb_name)
                         pdb_path = os.path.join(absdirpath, pdb_name)
                         ourpdb_info_pair = self.pdb_paths.get(pdb_path, None)
                         ourpdbmtime = None
@@ -415,8 +417,9 @@ class PDBDataBuffer():
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path, pdb_name = os.path.split(pdb_path)
-            dir_paths.setdefault(dir_path, set())
-            dir_paths[dir_path].add(pdb_name)
+            if dir_path in self.changed_dirs:
+                dir_paths.setdefault(dir_path, set())
+                dir_paths[dir_path].add(pdb_name)
         for dir_path, pdb_names in dir_paths.items():
             cache_path = os.path.join(dir_path, '.paperclip_cache')
             cache_file = None
@@ -424,6 +427,12 @@ class PDBDataBuffer():
                 cache_file = open(cache_path, 'r+')
             except FileNotFoundError:
                 cache_file = open(cache_path, 'w+')
+            while True:
+                try:
+                    fcntl.flock(cache_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.05)
             self.retrieve_data_from_cache(dir_path, cache_fd=cache_file)
             dir_data = {}
             dir_pdb_paths = {}
@@ -436,8 +445,10 @@ class PDBDataBuffer():
                 except KeyError:
                     pass
             cache_file.write(str([dir_data, dir_pdb_paths]))
+            fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
+            self.changed_dirs = set()
     def get_pdb_file_info(self, path):
         """Returns an object that in theory contains the absolute path, mtime, contents
         hash, and maybe contents of a PDB. The first three are accessed
@@ -878,14 +889,13 @@ against their energy score, optionally specifying an upper bound on score:
                     functools.reduce(
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
-        plt.imshow(avg_matrix, cmap='hot', interpolation='nearest',
+        DEBUG_OUT('avg_matrix:\n', avg_matrix, '\n')
+        plt.imshow(avg_matrix, cmap='hot', interpolation='none',
                    extent=[parsed_args.start_i, parsed_args.end_i,
                            parsed_args.end_i, parsed_args.start_i],
                    aspect=1)
-        sys.stdout.flush()
 
 if __name__ == "__main__":
-    print('HELLO BEFORE CREATING COMMAND LINE')
     parser = argparse.ArgumentParser(
         description = "Interactive command-line interface for plotting and "
                       "analysis of batches of PDB files.")
