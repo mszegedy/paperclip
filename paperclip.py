@@ -12,7 +12,6 @@ interest. Most plotting commands are based on Matlab commands.
 '''
 
 ### Imports
-print('HELLO BEFORE IMPORTS')
 ## Python Standard Library
 import re
 import types, copy
@@ -33,6 +32,8 @@ import matplotlib.pyplot as plt
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
 
+DEBUG = True
+
 STDOUT = sys.stdout;
 MPICOMM   = MPI.COMM_WORLD
 MPIRANK   = MPICOMM.Get_rank()
@@ -46,7 +47,6 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
                       'bb_rmsd_including_O',
                       'all_atom_rmsd',
                       'nbr_atom_rmsd']
-print('HELLO AFTER IMPORTS',flush=True)
 
 ### Decorators
 
@@ -100,6 +100,11 @@ def continuous(f):
     return decorated
 
 ### Useful functions
+def DEBUG_OUT(*args, **kwargs):
+    if DEBUG:
+        print('DEBUG: ', end='')
+        kwargs['flush'] = True
+        print(*args, **kwargs)
 def get_filenames_from_dir_with_extension(dir_path, extension,
                                           strip_extensions_p=False):
     """Returns a list of files from a directory with the path stripped, and
@@ -147,8 +152,7 @@ def make_PDBDataBuffer_accessor(data_name):
                 getattr(self_, 'calculate_'+data_name) \
                     (file_info.get_contents(), *args,
                      params=params, **kwargs)
-            if self_.cachingp:
-                self_.update_caches()
+            self_.update_caches()
             return file_data[accessor_tuple]
     accessor.__name__ = 'get_'+data_name
     accessor.__doc__  = 'Call calculate_'+data_name+ \
@@ -173,13 +177,13 @@ def make_PDBDataBuffer_gatherer(data_name):
             WORK_TAG  = 2 # used by master to pass next path to worker
             # will be used to index into self_.data to retrieve final result:
             file_indices_dict = {}
-            print('\n\nretrieving caches for for the first time\n\n', flush=True)
+            DEBUG_OUT('retrieving caches for the first time')
             if MPIRANK == 0:
                 current_file_index = 0
                 working_threads = MPISIZE-1
                 def save_result(result):
                     file_info_dict, file_data, accessor_tuple = result
-                    print('\n\nabout to save result for '+file_info_dict['path']+'\n\n', flush=True)
+                    DEBUG_OUT('about to save result for '+file_info_dict['path'])
                     self_.pdb_paths[file_info_dict['path']] = \
                         {'mtime': file_info_dict['mtime'],
                          'hash':  file_info_dict['hash']}
@@ -188,17 +192,17 @@ def make_PDBDataBuffer_gatherer(data_name):
                               [accessor_tuple] = file_data
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_tuple)
-                    print('\n\njust saved result for '+file_info_dict['path']+'\n\n', flush=True)
+                    DEBUG_OUT('just saved result for '+file_info_dict['path'])
                     sys.stdout.flush()
                 for dirname in set((os.path.dirname(path) \
                                     for path in abs_file_list)):
+                    DEBUG_OUT('retrieving caches for '+dirname)
                     self_.retrieve_data_from_cache(dirname)
+                DEBUG_OUT('all caches retrieved.')
                 while True:
-                    print('\n\nabout to try to receive a message\n\n', flush=True)
                     result = MPICOMM.recv(source=MPI.ANY_SOURCE,
                                           tag=MPI.ANY_TAG,
                                           status=MPISTATUS)
-                    print('\n\nmessage received\n\n', flush=True)
                     result_source = MPISTATUS.Get_source()
                     result_tag    = MPISTATUS.Get_tag()
                     # try to find a PDB we don't have the data for yet:
@@ -223,18 +227,16 @@ def make_PDBDataBuffer_gatherer(data_name):
                         except KeyError:
                             break
                     if current_file_index < len(abs_file_list):
-                        print('\n\nabout to try to send a WORK message for '+file_info.path+'\n\n', flush=True)
+                        DEBUG_OUT('assigning '+file_info.path)
                         MPICOMM.send([file_info_dict,
                                       file_path,
                                       accessor_tuple],
                                      dest=result_source, tag=WORK_TAG)
-                        print('\n\nWORK message sent\n\n', flush=True)
+                        DEBUG_OUT('assignment sent')
                         current_file_index += 1
                     else:
-                        print('\n\nabout to try to send a QUIT message\n\n', flush=True)
                         MPICOMM.send(QUIT_GATHERING_SIGNAL,
                                      dest=result_source, tag=WORK_TAG)
-                        print('\n\nQUIT message sent\n\n', flush=True)
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
@@ -334,7 +336,7 @@ class PDBDataBuffer():
     """
     ## Core functionality
     def __init__(self):
-        print('\n\nconstructing PDBDataBuffer\n\n', flush=True)
+        print('\n\nconstructing PDBDataBuffer\n\n')
         self.cachingp = MPIRANK == 0
         self.data = {}
         self.pdb_paths = {}
@@ -371,21 +373,27 @@ class PDBDataBuffer():
                     cache_fd.seek(pos)
                 else:
                     try:
+                        DEBUG_OUT('opening and retieving cache at'+cache_path)
                         with open(cache_path, 'r') as cache_file:
                             retrieved = ast.literal_eval(cache_file.read())
+                        DEBUG_OUT('cache at '+cache_path+' retrieved')
                     except (FileNotFoundError, SyntaxError):
                         pass
                 if retrieved is not None:
                     diskdata, disk_pdb_info = retrieved
                     for content_key, content in diskdata.items():
+                        DEBUG_OUT('reading data for content key '+content_key)
                         for data_name, data_keys in content.items():
+                            DEBUG_OUT('  reading data type '+data_name)
                             for data_key, data in data_keys.items():
+                                print('    reading data key '+str(data_key))
                                 self.data.setdefault(content_key,{})
                                 self.data[content_key].setdefault(data_name,{})
                                 self.data[content_key] \
                                          [data_name] \
                                          [data_key] = data
                     for pdb_name, pdb_info_pair in disk_pdb_info.items():
+                        print('saving info for '+pdb_name)
                         pdb_path = os.path.join(absdirpath, pdb_name)
                         ourpdb_info_pair = self.pdb_paths.get(pdb_path, None)
                         ourpdbmtime = None
@@ -402,6 +410,8 @@ class PDBDataBuffer():
         """Updates the caches for every directory the cache knows about. Note:
         this method is not concurrency-safe. It is your job to write
         concurrent code around it."""
+        if not self.cachingp:
+            return
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path, pdb_name = os.path.split(pdb_path)
@@ -821,7 +831,6 @@ against their energy score, optionally specifying an upper bound on score:
         plt.plot(rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
-        print('\n\n\n\ngonna plot neighbors for '+arg+'\n\n\n\n', flush=True)
         sys.stdout.flush()
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
@@ -847,7 +856,6 @@ against their energy score, optionally specifying an upper bound on score:
                 else:
                     params.append(param+'.params')
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
-        print('\n\nabout to find neighbors for '+arg+'\n\n', flush=True)
         matrices = self.data_buffer.gather_neighbors(
                        (os.path.join(parsed_args.in_dir, filename) \
                         for filename in filenames_in_in_dir \
@@ -874,11 +882,10 @@ against their energy score, optionally specifying an upper bound on score:
                    extent=[parsed_args.start_i, parsed_args.end_i,
                            parsed_args.end_i, parsed_args.start_i],
                    aspect=1)
-        print('\n\n\n\nfinished plotting neighbors for '+arg+'\n\n\n\n', flush=True)
         sys.stdout.flush()
 
 if __name__ == "__main__":
-    print('HELLO BEFORE CREATING COMMAND LINE', flush=True)
+    print('HELLO BEFORE CREATING COMMAND LINE')
     parser = argparse.ArgumentParser(
         description = "Interactive command-line interface for plotting and "
                       "analysis of batches of PDB files.")
@@ -905,12 +912,10 @@ if __name__ == "__main__":
     OURCMDLINE = OurCmdLine()
     OURCMDLINE.settings['continuous_mode'] = parsed_args.continuousp
     OURCMDLINE.settings['plotting'] = not parsed_args.continuousp
-    print('HELLO AFTER CREATING COMMAND LINE', flush=True)
     if MPIRANK != 0:
         DEVNULL = open(os.devnull, 'w')
         sys.stdout = DEVNULL
     if parsed_args.script is not None:
-        print('HELLO AFTER ENTERING LOOP', flush=True)
         with open(parsed_args.script) as f:
             OURCMDLINE.cmdqueue.extend(f.read().splitlines())
     if parsed_args.backgroundp:
