@@ -174,27 +174,25 @@ def make_PDBDataBuffer_gatherer(data_name):
             # will be used to index into self_.data to retrieve final result:
             file_indices_dict = {}
             print('\n\nretrieving caches for for the first time\n\n', flush=True)
-            for dirname in set((os.path.dirname(path) \
-                                for path in abs_file_list)):
-                self_.retrieve_data_from_cache(dirname)
             if MPIRANK == 0:
                 current_file_index = 0
                 working_threads = MPISIZE-1
                 def save_result(result):
-                    file_info_dict = result[0]
-                    file_data      = result[1]
-                    accessor_tuple = result[2]
+                    file_info_dict, file_data, accessor_tuple = result
+                    print('\n\nabout to save result for '+file_info_dict['path']+'\n\n', flush=True)
                     self_.pdb_paths[file_info_dict['path']] = \
                         {'mtime': file_info_dict['mtime'],
                          'hash':  file_info_dict['hash']}
                     self_.data.setdefault(file_info_dict['hash'], {}) \
                               .setdefault(data_name, {}) \
                               [accessor_tuple] = file_data
-                    self_.update_caches()
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_tuple)
                     print('\n\njust saved result for '+file_info_dict['path']+'\n\n', flush=True)
                     sys.stdout.flush()
+                for dirname in set((os.path.dirname(path) \
+                                    for path in abs_file_list)):
+                    self_.retrieve_data_from_cache(dirname)
                 while True:
                     print('\n\nabout to try to receive a message\n\n', flush=True)
                     result = MPICOMM.recv(source=MPI.ANY_SOURCE,
@@ -203,9 +201,32 @@ def make_PDBDataBuffer_gatherer(data_name):
                     print('\n\nmessage received\n\n', flush=True)
                     result_source = MPISTATUS.Get_source()
                     result_tag    = MPISTATUS.Get_tag()
+                    # try to find a PDB we don't have the data for yet:
+                    while current_file_index < len(abs_file_list):
+                        file_path = abs_file_list[current_file_index]
+                        file_info = self_.get_pdb_file_info(file_path)
+                        file_data = self_.data.setdefault(file_info.hash, {}) \
+                                              .setdefault(data_name, {})
+                        kwargs_args_list = list(kwargs.keys())
+                        kwargs_args_list.sort()
+                        accessor_tuple = tuple(args) + \
+                                         tuple(kwargs[arg] \
+                                               for arg in kwargs_args_list)
+                        file_info_dict = {'path':  file_info.path,
+                                          'mtime': file_info.mtime,
+                                          'hash':  file_info.hash}
+                        try:
+                            save_result([file_info_dict,
+                                         file_data[accessor_tuple],
+                                         accessor_tuple])
+                            current_file_index += 1
+                        except KeyError:
+                            break
                     if current_file_index < len(abs_file_list):
-                        print('\n\nabout to try to send a WORK message\n\n', flush=True)
-                        MPICOMM.send(abs_file_list[current_file_index],
+                        print('\n\nabout to try to send a WORK message for '+file_info.path+'\n\n', flush=True)
+                        MPICOMM.send([file_info_dict,
+                                      file_path,
+                                      accessor_tuple],
                                      dest=result_source, tag=WORK_TAG)
                         print('\n\nWORK message sent\n\n', flush=True)
                         current_file_index += 1
@@ -217,39 +238,21 @@ def make_PDBDataBuffer_gatherer(data_name):
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
+                        self_.update_caches()
                     if working_threads <= 0:
                         break
             else:
                 MPICOMM.send(None, dest=0, tag=READY_TAG)
                 while True:
-                    file_path = MPICOMM.recv(source=0, tag=WORK_TAG)
-                    if file_path == QUIT_GATHERING_SIGNAL:
+                    package = MPICOMM.recv(source=0, tag=WORK_TAG)
+                    if package == QUIT_GATHERING_SIGNAL:
                         break
-                    # this is nearly a copy/paste of the accessor code, but
-                    # it stores some extra stuff and doesn't retrieve or write
-                    # any caches
-                    result_data = None
-                    file_info = self_.get_pdb_file_info(file_path)
-                    file_data = self_.data.setdefault(file_info.hash, {}) \
-                                          .setdefault(data_name, {})
-                    kwargs_args_list = list(kwargs.keys())
-                    kwargs_args_list.sort()
-                    accessor_tuple = tuple(args) + \
-                                     tuple(kwargs[arg] \
-                                           for arg in kwargs_args_list)
-                    try:
-                        result_data = file_data[accessor_tuple]
-                    except KeyError:
-                        result_data = \
-                            getattr(self_, 'calculate_'+data_name) \
-                                (file_info.get_contents(), *args,
-                                 params=params, **kwargs)
-                    # can't be sending an object with a pointer in it to an
-                    # object in a different thread:
-                    file_info.pdb_paths_dict = None
-                    file_info_dict = {'path':  file_info.path,
-                                      'mtime': file_info.mtime,
-                                      'hash':  file_info.hash}
+                    file_info_dict, file_path, accessor_tuple = package
+                    contents = open(file_path, 'r').read()
+                    result_data = \
+                        getattr(self_, 'calculate_'+data_name) \
+                            (contents, *args,
+                             params=params, **kwargs)
                     MPICOMM.send(copy.deepcopy([file_info_dict,
                                                 result_data,
                                                 accessor_tuple]),
