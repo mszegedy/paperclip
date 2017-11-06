@@ -12,7 +12,7 @@ interest. Most plotting commands are based on Matlab commands.
 '''
 
 ### Imports
-
+print('HELLO BEFORE IMPORTS')
 ## Python Standard Library
 import re
 import types, copy
@@ -46,6 +46,7 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
                       'bb_rmsd_including_O',
                       'all_atom_rmsd',
                       'nbr_atom_rmsd']
+print('HELLO AFTER IMPORTS',flush=True)
 
 ### Decorators
 
@@ -172,6 +173,7 @@ def make_PDBDataBuffer_gatherer(data_name):
             WORK_TAG  = 2 # used by master to pass next path to worker
             # will be used to index into self_.data to retrieve final result:
             file_indices_dict = {}
+            print('\n\nretrieving caches for for the first time\n\n', flush=True)
             for dirname in set((os.path.dirname(path) \
                                 for path in abs_file_list)):
                 self_.retrieve_data_from_cache(dirname)
@@ -191,19 +193,27 @@ def make_PDBDataBuffer_gatherer(data_name):
                     self_.update_caches()
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_tuple)
+                    print('\n\njust saved result for '+file_info_dict['path']+'\n\n', flush=True)
+                    sys.stdout.flush()
                 while True:
+                    print('\n\nabout to try to receive a message\n\n', flush=True)
                     result = MPICOMM.recv(source=MPI.ANY_SOURCE,
                                           tag=MPI.ANY_TAG,
                                           status=MPISTATUS)
+                    print('\n\nmessage received\n\n', flush=True)
                     result_source = MPISTATUS.Get_source()
                     result_tag    = MPISTATUS.Get_tag()
                     if current_file_index < len(abs_file_list):
+                        print('\n\nabout to try to send a WORK message\n\n', flush=True)
                         MPICOMM.send(abs_file_list[current_file_index],
                                      dest=result_source, tag=WORK_TAG)
+                        print('\n\nWORK message sent\n\n', flush=True)
                         current_file_index += 1
                     else:
+                        print('\n\nabout to try to send a QUIT message\n\n', flush=True)
                         MPICOMM.send(QUIT_GATHERING_SIGNAL,
                                      dest=result_source, tag=WORK_TAG)
+                        print('\n\nQUIT message sent\n\n', flush=True)
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
@@ -321,6 +331,7 @@ class PDBDataBuffer():
     """
     ## Core functionality
     def __init__(self):
+        print('\n\nconstructing PDBDataBuffer\n\n', flush=True)
         self.cachingp = MPIRANK == 0
         self.data = {}
         self.pdb_paths = {}
@@ -496,8 +507,15 @@ class PDBDataBuffer():
         for i in range(1,n_residues+1):
             result.append([])
             for j in range(1,n_residues+1):
-                result[-1].append(
-                    mpre.res_neighbors_p(pose,i,j,coarsep=coarsep,bound=bound))
+                if i > j:
+                    result[-1].append(result[j-1][i-1])
+                else:
+                    result[-1].append(
+                        # int for space efficiency in cache file
+                        int(mpre.res_neighbors_p(pose,
+                                                 i, j,
+                                                 coarsep=coarsep,
+                                                 bound=bound)))
         return result
 
 ### Main class
@@ -732,6 +750,7 @@ commands run indefinitely:
         plt.ylabel(arg)
     def do_subplot(self, arg):
         """Create a subplot with Matlab syntax:  subplot 2 1 1"""
+        print('\n\nsetting subplot '+arg+'\n\n')
         args = arg.split()
         if len(args) == 3:
             plt.subplot(*[int(a) for a in args])
@@ -799,6 +818,8 @@ against their energy score, optionally specifying an upper bound on score:
         plt.plot(rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
+        print('\n\n\n\ngonna plot neighbors for '+arg+'\n\n\n\n', flush=True)
+        sys.stdout.flush()
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
                             action='store')
@@ -823,6 +844,7 @@ against their energy score, optionally specifying an upper bound on score:
                 else:
                     params.append(param+'.params')
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        print('\n\nabout to find neighbors for '+arg+'\n\n', flush=True)
         matrices = self.data_buffer.gather_neighbors(
                        (os.path.join(parsed_args.in_dir, filename) \
                         for filename in filenames_in_in_dir \
@@ -847,9 +869,13 @@ against their energy score, optionally specifying an upper bound on score:
                         [m[x][y] for m in matrices])/n_matrices)
         plt.imshow(avg_matrix, cmap='hot', interpolation='nearest',
                    extent=[parsed_args.start_i, parsed_args.end_i,
-                           parsed_args.end_i, parsed_args.start_i])
+                           parsed_args.end_i, parsed_args.start_i],
+                   aspect=1)
+        print('\n\n\n\nfinished plotting neighbors for '+arg+'\n\n\n\n', flush=True)
+        sys.stdout.flush()
 
 if __name__ == "__main__":
+    print('HELLO BEFORE CREATING COMMAND LINE', flush=True)
     parser = argparse.ArgumentParser(
         description = "Interactive command-line interface for plotting and "
                       "analysis of batches of PDB files.")
@@ -876,10 +902,12 @@ if __name__ == "__main__":
     OURCMDLINE = OurCmdLine()
     OURCMDLINE.settings['continuous_mode'] = parsed_args.continuousp
     OURCMDLINE.settings['plotting'] = not parsed_args.continuousp
+    print('HELLO AFTER CREATING COMMAND LINE', flush=True)
     if MPIRANK != 0:
         DEVNULL = open(os.devnull, 'w')
         sys.stdout = DEVNULL
     if parsed_args.script is not None:
+        print('HELLO AFTER ENTERING LOOP', flush=True)
         with open(parsed_args.script) as f:
             OURCMDLINE.cmdqueue.extend(f.read().splitlines())
     if parsed_args.backgroundp:
