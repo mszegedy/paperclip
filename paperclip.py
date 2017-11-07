@@ -772,6 +772,12 @@ commands run indefinitely:
     def do_plot_ylabel(self, arg):
         """Set the ylabel of the current plot:  plot_ylabel My ylabel"""
         plt.ylabel(arg)
+    def do_plot_size(self, arg):
+        """Set the plot size in inches:  plot_size 10 10"""
+        try:
+            plt.gcf().set_size_inches(*(float(x) for x in arg.split()))
+        except:
+            print('Provide two numbers separated by spaces.')
     def do_subplot(self, arg):
         """Create a subplot with Matlab syntax:  subplot 2 1 1"""
         print('\n\nsetting subplot '+arg+'\n\n')
@@ -842,7 +848,6 @@ against their energy score, optionally specifying an upper bound on score:
         plt.plot(rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
-        sys.stdout.flush()
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
                             action='store')
@@ -894,6 +899,9 @@ against their energy score, optionally specifying an upper bound on score:
                    extent=[parsed_args.start_i, parsed_args.end_i,
                            parsed_args.end_i, parsed_args.start_i],
                    aspect=1)
+        plt.tick_params(axis='both', which='both',
+                        top='off', bottom='off', left='off', right='off',
+                        labelbottom='off')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
