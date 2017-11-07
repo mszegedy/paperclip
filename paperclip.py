@@ -194,7 +194,9 @@ def make_PDBDataBuffer_gatherer(data_name):
                               [accessor_tuple] = file_data
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_tuple)
-                    self_.changed_dirs.add(file_info_dict['path'])
+                    self_.changed_dirs.add(
+                        os.path.dirname(
+                            file_info_dict['path']))
                     DEBUG_OUT('just saved result for '+file_info_dict['path'])
                 for dirname in set((os.path.dirname(path) \
                                     for path in abs_file_list)):
@@ -414,14 +416,19 @@ class PDBDataBuffer():
         concurrent code around it."""
         if not self.cachingp:
             return
+        DEBUG_OUT('about to update caches. self.changed_dirs:\n  ',
+                  self.changed_dirs)
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path, pdb_name = os.path.split(pdb_path)
             if dir_path in self.changed_dirs:
                 dir_paths.setdefault(dir_path, set())
                 dir_paths[dir_path].add(pdb_name)
+        DEBUG_OUT('computed paths for cache update:\n  ',
+                  dir_paths)
         for dir_path, pdb_names in dir_paths.items():
             cache_path = os.path.join(dir_path, '.paperclip_cache')
+            DEBUG_OUT('gonna try updating cache at ', cache_path)
             cache_file = None
             try:
                 cache_file = open(cache_path, 'r+')
@@ -444,9 +451,11 @@ class PDBDataBuffer():
                     dir_data[ourhash] = self.data[ourhash]
                 except KeyError:
                     pass
+                DEBUG_OUT('  updated cache with data for PDB at ', pdb_path)
             cache_file.write(str([dir_data, dir_pdb_paths]))
             fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
+            DEBUG_OUT('wrote cache file at ', cache_path)
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
             self.changed_dirs = set()
     def get_pdb_file_info(self, path):
@@ -894,7 +903,6 @@ against their energy score, optionally specifying an upper bound on score:
                     functools.reduce(
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
-        DEBUG_OUT('avg_matrix:\n', avg_matrix, '\n')
         plt.imshow(avg_matrix, cmap='hot', interpolation='none',
                    extent=[parsed_args.start_i, parsed_args.end_i,
                            parsed_args.end_i, parsed_args.start_i],
