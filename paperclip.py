@@ -149,13 +149,16 @@ def make_PDBDataBuffer_accessor(data_name):
         try:
             return file_data[accessor_tuple]
         except KeyError:
-            file_data[accessor_tuple] = \
-                getattr(self_, 'calculate_'+data_name) \
-                    (file_info.get_contents(), *args,
-                     params=params, **kwargs)
-            self_.changed_dirs.add(os.path.dirname(file_path))
-            self_.update_caches()
-            return file_data[accessor_tuple]
+            if self_.calculatingp:
+                file_data[accessor_tuple] = \
+                    getattr(self_, 'calculate_'+data_name) \
+                        (file_info.get_contents(), *args,
+                         params=params, **kwargs)
+                self_.changed_dirs.add(os.path.dirname(file_path))
+                self_.update_caches()
+                return file_data[accessor_tuple]
+            else:
+                raise KeyError('That file\'s not in the cache.')
     accessor.__name__ = 'get_'+data_name
     accessor.__doc__  = 'Call calculate_'+data_name+ \
                         '() on a file path with caching magic.'
@@ -166,11 +169,17 @@ def make_PDBDataBuffer_gatherer(data_name):
     list of filenames instead of a single filename."""
     def gatherer(self_, file_list, *args, params=None, **kwargs):
         abs_file_list = [os.path.abspath(path) for path in file_list]
-        if MPISIZE == 1:
-            return [getattr(self_, 'get_'+data_name) \
-                        (file_path, *args,
-                         params=params, **kwargs) \
-                    for file_path in abs_file_list]
+        if MPISIZE == 1 or not self_.calculatingp:
+            result = []
+            for file_path in abs_file_list:
+                try:
+                    result.append(
+                        getattr(self_, 'get_'+data_name) \
+                                   (file_path, *args,
+                                    params=params, **kwargs))
+                except KeyError:
+                    pass
+            return result
         else:
             # getting this instead of a path makes a worker thread die:
             QUIT_GATHERING_SIGNAL = -1
@@ -340,6 +349,7 @@ class PDBDataBuffer():
     """
     ## Core functionality
     def __init__(self):
+        self.calculatingp = True
         self.cachingp = MPIRANK == 0
         self.data = {}
         self.pdb_paths = {}
@@ -416,19 +426,19 @@ class PDBDataBuffer():
         concurrent code around it."""
         if not self.cachingp:
             return
-        DEBUG_OUT('about to update caches. self.changed_dirs:\n  ',
-                  self.changed_dirs)
+        #DEBUG_OUT('about to update caches. self.changed_dirs:\n  ',
+        #          self.changed_dirs)
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path, pdb_name = os.path.split(pdb_path)
             if dir_path in self.changed_dirs:
                 dir_paths.setdefault(dir_path, set())
                 dir_paths[dir_path].add(pdb_name)
-        DEBUG_OUT('computed paths for cache update:\n  ',
-                  dir_paths)
+        #DEBUG_OUT('computed paths for cache update:\n  ',
+        #          dir_paths)
         for dir_path, pdb_names in dir_paths.items():
             cache_path = os.path.join(dir_path, '.paperclip_cache')
-            DEBUG_OUT('gonna try updating cache at ', cache_path)
+            #DEBUG_OUT('gonna try updating cache at ', cache_path)
             cache_file = None
             try:
                 cache_file = open(cache_path, 'r+')
@@ -451,7 +461,7 @@ class PDBDataBuffer():
                     dir_data[ourhash] = self.data[ourhash]
                 except KeyError:
                     pass
-                DEBUG_OUT('  updated cache with data for PDB at ', pdb_path)
+                #DEBUG_OUT('  updated cache with data for PDB at ', pdb_path)
             cache_file.write(str([dir_data, dir_pdb_paths]))
             fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
@@ -690,6 +700,8 @@ Available settings are:
                 print('That\'s not a valid setting name. Try '
                       '\'get_settings\'.')
                 return
+        self.data_buffer.calculatingp = self.settings['calculation']
+        self.data_buffer.cachingp     = self.settings['caching']
     def complete_set(self, text, line, begidx, endidx):
         position = self.get_arg_position(text, line)
         if position == 1:
@@ -809,7 +821,7 @@ commands run indefinitely:
 against their energy score, optionally specifying an upper bound on score:
     plot_dir_rmsd_vs_score indir infile.pdb  |
     plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
-    plot_dir_rmsd_vs_score indir infile.pdb 4.6"""
+    plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
         global PYROSETTA_ENV
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
@@ -830,7 +842,10 @@ against their energy score, optionally specifying an upper bound on score:
                             action='store',
                             nargs='*',
                             default=None)
-        parsed_args = parser.parse_args(arg.split())
+        try:
+            parsed_args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
         params = None
         if parsed_args.params:
@@ -840,23 +855,31 @@ against their energy score, optionally specifying an upper bound on score:
                     params.append(param)
                 else:
                     params.append(param+'.params')
-        data = zip(self.data_buffer.gather_rmsd(
-                       (os.path.join(parsed_args.in_dir, filename) \
-                        for filename in filenames_in_in_dir \
-                        if filename.endswith('.pdb')),
-                       parsed_args.in_file,
-                       'all_atom_rmsd',
-                       params=params),
-                   self.data_buffer.gather_score(
-                       (os.path.join(parsed_args.in_dir, filename) \
-                        for filename in filenames_in_in_dir \
-                        if filename.endswith('.pdb')),
-                       PYROSETTA_ENV.get_scorefxn_hash(),
-                       params=params))
-        rmsds,scores = zip(*(datapoint for datapoint in data if datapoint[1] < 0))
-        plt.plot(rmsds, scores, parsed_args.style)
+        data = set(zip(self.data_buffer.gather_rmsd(
+                           (os.path.join(parsed_args.in_dir, filename) \
+                            for filename in filenames_in_in_dir \
+                            if filename.endswith('.pdb')),
+                           parsed_args.in_file,
+                           'all_atom_rmsd',
+                           params=params),
+                       self.data_buffer.gather_score(
+                           (os.path.join(parsed_args.in_dir, filename) \
+                            for filename in filenames_in_in_dir \
+                            if filename.endswith('.pdb')),
+                           PYROSETTA_ENV.get_scorefxn_hash(),
+                           params=params)))
+        rmsds,scores = zip(*(datapoint \
+                             for datapoint in data \
+                             if datapoint[1] < parsed_args.bound))
+        if self.settings['plotting']:
+            plt.plot(rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
+        """Make a heatmap of how often two residues neighbor each other in
+a given directory. You must specify the range of residues over which to create
+the heatmap.
+    plot_dir_neighbors indir 1 100  |
+    plot_dir_neighbors indir 1 100 --params ABC"""
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
                             action='store')
@@ -871,7 +894,10 @@ against their energy score, optionally specifying an upper bound on score:
                             action='store',
                             nargs='*',
                             default=None)
-        parsed_args = parser.parse_args(arg.split())
+        try:
+            parsed_args = parser.parse_args(arg.split())
+        except SystemError:
+            return
         params = None
         if parsed_args.params:
             params = []
@@ -903,13 +929,14 @@ against their energy score, optionally specifying an upper bound on score:
                     functools.reduce(
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
-        plt.imshow(avg_matrix, cmap='hot', interpolation='none',
-                   extent=[parsed_args.start_i, parsed_args.end_i,
-                           parsed_args.end_i, parsed_args.start_i],
-                   aspect=1)
-        plt.tick_params(axis='both', which='both',
-                        top='off', bottom='off', left='off', right='off',
-                        labelbottom='off')
+        if self.settings['plotting']:
+            plt.imshow(avg_matrix, cmap='hot', interpolation='none',
+                       extent=[parsed_args.start_i, parsed_args.end_i,
+                               parsed_args.end_i, parsed_args.start_i],
+                       aspect=1)
+            plt.tick_params(axis='both', which='both',
+                            top='off', bottom='off', left='off', right='off',
+                            labelbottom='off')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
