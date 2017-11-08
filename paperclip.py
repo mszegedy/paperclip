@@ -19,6 +19,7 @@ import functools, operator
 import hashlib
 import argparse, os, time
 import subprocess
+import json
 import cmd
 import sys
 import ast
@@ -144,19 +145,19 @@ def make_PDBDataBuffer_accessor(data_name):
                               .setdefault(data_name, {})
         kwargs_args_list = list(kwargs.keys())
         kwargs_args_list.sort()
-        accessor_tuple = tuple(args) + \
-                         tuple(kwargs[arg] for arg in kwargs_args_list)
+        accessor_string = str(tuple(args) + \
+                              tuple(kwargs[arg] for arg in kwargs_args_list)
         try:
-            return file_data[accessor_tuple]
+            return file_data[accessor_string]
         except KeyError:
             if self_.calculatingp:
-                file_data[accessor_tuple] = \
+                file_data[accessor_string] = \
                     getattr(self_, 'calculate_'+data_name) \
                         (file_info.get_contents(), *args,
                          params=params, **kwargs)
                 self_.changed_dirs.add(os.path.dirname(file_path))
                 self_.update_caches()
-                return file_data[accessor_tuple]
+                return file_data[accessor_string]
             else:
                 raise KeyError('That file\'s not in the cache.')
     accessor.__name__ = 'get_'+data_name
@@ -193,16 +194,16 @@ def make_PDBDataBuffer_gatherer(data_name):
                 current_file_index = 0
                 working_threads = MPISIZE-1
                 def save_result(result):
-                    file_info_dict, file_data, accessor_tuple = result
+                    file_info_dict, file_data, accessor_string = result
                     DEBUG_OUT('about to save result for '+file_info_dict['path'])
                     self_.pdb_paths[file_info_dict['path']] = \
                         {'mtime': file_info_dict['mtime'],
                          'hash':  file_info_dict['hash']}
                     self_.data.setdefault(file_info_dict['hash'], {}) \
                               .setdefault(data_name, {}) \
-                              [accessor_tuple] = file_data
+                              [accessor_string] = file_data
                     file_indices_dict[file_info_dict['path']] = \
-                        (file_info_dict['hash'], data_name, accessor_tuple)
+                        (file_info_dict['hash'], data_name, accessor_string)
                     self_.changed_dirs.add(
                         os.path.dirname(
                             file_info_dict['path']))
@@ -226,16 +227,17 @@ def make_PDBDataBuffer_gatherer(data_name):
                                               .setdefault(data_name, {})
                         kwargs_args_list = list(kwargs.keys())
                         kwargs_args_list.sort()
-                        accessor_tuple = tuple(args) + \
-                                         tuple(kwargs[arg] \
-                                               for arg in kwargs_args_list)
+                        accessor_string = str(tuple(args) + \
+                                              tuple(kwargs[arg] \
+                                                    for arg \
+                                                    in kwargs_args_list))
                         file_info_dict = {'path':  file_info.path,
                                           'mtime': file_info.mtime,
                                           'hash':  file_info.hash}
                         try:
                             save_result([file_info_dict,
-                                         file_data[accessor_tuple],
-                                         accessor_tuple])
+                                         file_data[accessor_string],
+                                         accessor_string])
                             current_file_index += 1
                         except KeyError:
                             break
@@ -243,7 +245,7 @@ def make_PDBDataBuffer_gatherer(data_name):
                         DEBUG_OUT('assigning '+file_info.path)
                         MPICOMM.send([file_info_dict,
                                       file_path,
-                                      accessor_tuple],
+                                      accessor_string],
                                      dest=result_source, tag=WORK_TAG)
                         DEBUG_OUT('assignment sent')
                         current_file_index += 1
@@ -262,7 +264,7 @@ def make_PDBDataBuffer_gatherer(data_name):
                     package = MPICOMM.recv(source=0, tag=WORK_TAG)
                     if package == QUIT_GATHERING_SIGNAL:
                         break
-                    file_info_dict, file_path, accessor_tuple = package
+                    file_info_dict, file_path, accessor_string = package
                     contents = open(file_path, 'r').read()
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
@@ -270,7 +272,7 @@ def make_PDBDataBuffer_gatherer(data_name):
                              params=params, **kwargs)
                     MPICOMM.send(copy.deepcopy([file_info_dict,
                                                 result_data,
-                                                accessor_tuple]),
+                                                accessor_string]),
                                  dest=0, tag=DONE_TAG)
             # Synchronize everything that could have possibly changed:
             self_.data = MPICOMM.bcast(self_.data, root=0)
@@ -381,31 +383,43 @@ class PDBDataBuffer():
                     pos = cache_fd.tell()
                     cache_fd.seek(0)
                     try:
-                        retrieved = ast.literal_eval(cache_fd.read())
-                    except SyntaxError:
-                        pass
+                        retrieved = json.loads(cache_fd.read())
+                        DEBUG_OUT('cache at '+cache_fd.name+' retrieved')
+                    except json.decoder.JSONDecodeError:
+                        try:
+                            retrieved = ast.literal_eval(cache_file.read())
+                            was_literal = True
+                        except SyntaxError:
+                            pass
                     cache_fd.seek(pos)
                 else:
                     try:
-                        DEBUG_OUT('opening and retrieving cache at'+cache_path)
+                        #DEBUG_OUT('opening and retrieving cache at'+cache_path)
                         with open(cache_path, 'r') as cache_file:
-                            retrieved = ast.literal_eval(cache_file.read())
-                        DEBUG_OUT('cache at '+cache_path+' retrieved')
-                    except (FileNotFoundError, SyntaxError):
+                            retrieved = json.loads(cache_file.read())
+                        DEBUG_OUT('cache at '+cache_file.name+' retrieved')
+                    except FileNotFoundError:
                         pass
+                    except json.decoder.JSONDecodeError:
+                        try:
+                            retrieved = ast.literal_eval(cache_file.read())
+                            was_literal = True
+                        except SyntaxError:
+                            pass
                 if retrieved is not None:
                     diskdata, disk_pdb_info = retrieved
                     for content_key, content in diskdata.items():
-                        DEBUG_OUT('reading data for content key '+content_key)
+                        #DEBUG_OUT('reading data for content key '+content_key)
                         for data_name, data_keys in content.items():
-                            DEBUG_OUT('  reading data type '+data_name)
+                            #DEBUG_OUT('  reading data type '+data_name)
                             for data_key, data in data_keys.items():
-                                print('    reading data key '+str(data_key))
+                                #DEBUG_OUT('    reading data key '+str(data_key))
                                 self.data.setdefault(content_key,{})
                                 self.data[content_key].setdefault(data_name,{})
+                                # str(data_key) for backwards compatibility
                                 self.data[content_key] \
                                          [data_name] \
-                                         [data_key] = data
+                                         [str(data_key)] = data
                     for pdb_name, pdb_info_pair in disk_pdb_info.items():
                         DEBUG_OUT('saving info for '+pdb_name)
                         pdb_path = os.path.join(absdirpath, pdb_name)
@@ -421,9 +435,8 @@ class PDBDataBuffer():
         except FileNotFoundError:
             pass
     def update_caches(self):
-        """Updates the caches for every directory the cache knows about. Note:
-        this method is not concurrency-safe. It is your job to write
-        concurrent code around it."""
+        """Updates the caches for every directory the cache knows about. This
+        method is thread-safe."""
         if not self.cachingp:
             return
         #DEBUG_OUT('about to update caches. self.changed_dirs:\n  ',
@@ -462,7 +475,7 @@ class PDBDataBuffer():
                 except KeyError:
                     pass
                 #DEBUG_OUT('  updated cache with data for PDB at ', pdb_path)
-            cache_file.write(str([dir_data, dir_pdb_paths]))
+            cache_file.write(json.dumps([dir_data, dir_pdb_paths]))
             fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
             DEBUG_OUT('wrote cache file at ', cache_path)
@@ -686,9 +699,9 @@ Available settings are:
                 return
         else:
             value = None
-            if str.lower(varvalue) in ('yes','y'):
+            if str.lower(varvalue) in ('yes','y','t','true'):
                 value = True
-            elif str.lower(varvalue) in ('no','n'):
+            elif str.lower(varvalue) in ('no','n','f','false'):
                 value = False
             else:
                 print('That\'s not a valid setting value. Try \'yes\' or'
@@ -718,7 +731,7 @@ Available settings are:
     def do_set_timelimit(self, arg):
         """Set a time limit on analysis commands, in seconds. Leave as 0 to let
 commands run indefinitely:
-   set_timelimit 600"""
+  set_timelimit 600"""
         try:
             self.timelimit = int(arg)
         except ValueError:
@@ -728,7 +741,17 @@ commands run indefinitely:
     # Data buffer
     def do_clear_data(self, arg):
         """Clear the data buffer of any data:  clear_data"""
+        calculatingp = self.data_buffer.calculatingp
+        cachingp     = self.data_buffer.cachingp
         self.data_buffer = PDBDataBuffer()
+        self.data_buffer.calculatingp = calculatingp
+        self.data_buffer.cachingp     = cachingp
+    def do_update_caches(self, arg):
+        """Update the caches for the data buffer:  update_caches"""
+        cachingp = self.data_buffer.cachingp
+        self.data_buffer.cachingp = True
+        self.data_buffer.update_caches()
+        self.data_buffer.cachingp = cachingp
     # Text buffer
     def do_clear_text(self, arg):
         """Clear the text buffer of any text output:  clear_text"""
@@ -819,9 +842,9 @@ commands run indefinitely:
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
 against their energy score, optionally specifying an upper bound on score:
-    plot_dir_rmsd_vs_score indir infile.pdb  |
-    plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
-    plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
+  plot_dir_rmsd_vs_score indir infile.pdb  |
+  plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
+  plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
         global PYROSETTA_ENV
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
@@ -878,8 +901,8 @@ against their energy score, optionally specifying an upper bound on score:
         """Make a heatmap of how often two residues neighbor each other in
 a given directory. You must specify the range of residues over which to create
 the heatmap.
-    plot_dir_neighbors indir 1 100  |
-    plot_dir_neighbors indir 1 100 --params ABC"""
+  plot_dir_neighbors indir 1 100  |
+  plot_dir_neighbors indir 1 100 --params ABC"""
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
                             action='store')
@@ -930,7 +953,7 @@ the heatmap.
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
         if self.settings['plotting']:
-            plt.imshow(avg_matrix, cmap='hot', interpolation='none',
+            plt.imshow(avg_matrix, cmap='hot_r', interpolation='none',
                        extent=[parsed_args.start_i, parsed_args.end_i,
                                parsed_args.end_i, parsed_args.start_i],
                        aspect=1)
