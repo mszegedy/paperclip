@@ -146,7 +146,7 @@ def make_PDBDataBuffer_accessor(data_name):
         kwargs_args_list = list(kwargs.keys())
         kwargs_args_list.sort()
         accessor_string = str(tuple(args) + \
-                              tuple(kwargs[arg] for arg in kwargs_args_list)
+                              tuple(kwargs[arg] for arg in kwargs_args_list))
         try:
             return file_data[accessor_string]
         except KeyError:
@@ -378,35 +378,31 @@ class PDBDataBuffer():
             diskmtime = os.path.getmtime(cache_path)
             ourmtime = self.cache_paths.setdefault(absdirpath, 0)
             if diskmtime > ourmtime:
+                file_contents = None
                 retrieved = None
                 if cache_fd is not None:
                     pos = cache_fd.tell()
                     cache_fd.seek(0)
-                    try:
-                        retrieved = json.loads(cache_fd.read())
-                        DEBUG_OUT('cache at '+cache_fd.name+' retrieved')
-                    except json.decoder.JSONDecodeError:
-                        try:
-                            retrieved = ast.literal_eval(cache_file.read())
-                            was_literal = True
-                        except SyntaxError:
-                            pass
+                    file_contents = cache_fd.read()
+                    DEBUG_OUT('cache at '+cache_fd.name+' read')
                     cache_fd.seek(pos)
                 else:
                     try:
                         #DEBUG_OUT('opening and retrieving cache at'+cache_path)
                         with open(cache_path, 'r') as cache_file:
-                            retrieved = json.loads(cache_file.read())
-                        DEBUG_OUT('cache at '+cache_file.name+' retrieved')
+                            file_contents = cache_file.read()
+                            DEBUG_OUT('cache at '+cache_file.name+' read')
                     except FileNotFoundError:
                         pass
-                    except json.decoder.JSONDecodeError:
-                        try:
-                            retrieved = ast.literal_eval(cache_file.read())
-                            was_literal = True
-                        except SyntaxError:
-                            pass
+                try:
+                    retrieved = json.loads(file_contents)
+                except json.decoder.JSONDecodeError:
+                    try:
+                        retrieved = ast.literal_eval(file_contents)
+                    except SyntaxError:
+                        pass
                 if retrieved is not None:
+                    DEBUG_OUT('cache retrieved')
                     diskdata, disk_pdb_info = retrieved
                     for content_key, content in diskdata.items():
                         #DEBUG_OUT('reading data for content key '+content_key)
