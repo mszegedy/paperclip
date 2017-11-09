@@ -5,10 +5,11 @@ PAPERCLIP
 
 Depends on:
   Unix-like shell
-  Python3
-  PyRosetta (Python library)
-  mszpyrosettaextension (Python library)
-  intel_mkl
-  matplotlib (Python library)
-  timeout_decorator (Python library)
+  Python3                  (Amarel module)
+  PyRosetta               (Python library)
+  mszpyrosettaextension   (Python library)
+  intel_mkl                (Amarel module)
+  mpi4py                  (Python library)
+  matplotlib              (Python library)
+  timeout_decorator       (Python library)
   
