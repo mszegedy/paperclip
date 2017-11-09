@@ -189,7 +189,7 @@ def make_PDBDataBuffer_gatherer(data_name):
             WORK_TAG  = 2 # used by master to pass next path to worker
             # will be used to index into self_.data to retrieve final result:
             file_indices_dict = {}
-            DEBUG_OUT('retrieving caches for the first time')
+            DEBUG_OUT('retrieving caches for gather_ operation')
             if MPIRANK == 0:
                 current_file_index = 0
                 working_threads = MPISIZE-1
@@ -204,9 +204,6 @@ def make_PDBDataBuffer_gatherer(data_name):
                               [accessor_string] = file_data
                     file_indices_dict[file_info_dict['path']] = \
                         (file_info_dict['hash'], data_name, accessor_string)
-                    self_.changed_dirs.add(
-                        os.path.dirname(
-                            file_info_dict['path']))
                     DEBUG_OUT('just saved result for '+file_info_dict['path'])
                 for dirname in set((os.path.dirname(path) \
                                     for path in abs_file_list)):
@@ -255,6 +252,9 @@ def make_PDBDataBuffer_gatherer(data_name):
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
+                        self_.changed_dirs.add(
+                            os.path.dirname(
+                                result[0]['path']))
                         self_.update_caches()
                     if working_threads <= 0:
                         break
@@ -435,19 +435,14 @@ class PDBDataBuffer():
         method is thread-safe."""
         if not self.cachingp:
             return
-        #DEBUG_OUT('about to update caches. self.changed_dirs:\n  ',
-        #          self.changed_dirs)
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
             dir_path, pdb_name = os.path.split(pdb_path)
             if dir_path in self.changed_dirs:
                 dir_paths.setdefault(dir_path, set())
                 dir_paths[dir_path].add(pdb_name)
-        #DEBUG_OUT('computed paths for cache update:\n  ',
-        #          dir_paths)
         for dir_path, pdb_names in dir_paths.items():
             cache_path = os.path.join(dir_path, '.paperclip_cache')
-            #DEBUG_OUT('gonna try updating cache at ', cache_path)
             cache_file = None
             try:
                 cache_file = open(cache_path, 'r+')
@@ -949,10 +944,10 @@ the heatmap.
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
         if self.settings['plotting']:
-            plt.imshow(avg_matrix, cmap='hot_r', interpolation='none',
+            plt.imshow(avg_matrix, cmap='RdBu_r', interpolation='nearest',
                        extent=[parsed_args.start_i, parsed_args.end_i,
                                parsed_args.end_i, parsed_args.start_i],
-                       aspect=1)
+                       aspect=1, vmin=0, vmax=1)
             plt.tick_params(axis='both', which='both',
                             top='off', bottom='off', left='off', right='off',
                             labelbottom='off')
