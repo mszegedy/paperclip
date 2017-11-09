@@ -579,6 +579,7 @@ class OurCmdLine(cmd.Cmd):
                 'plotting': True,
                 'continuous_mode': False}
     timelimit = 0
+    last_im = None
     ## The two buffers:
     data_buffer = PDBDataBuffer() # contains computed data about PDBs
     text_buffer = ''              # contains text output
@@ -815,20 +816,30 @@ commands run indefinitely:
             print('Provide two numbers separated by spaces.')
     def do_subplot(self, arg):
         """Create a subplot with Matlab syntax:  subplot 2 1 1"""
-        print('\n\nsetting subplot '+arg+'\n\n')
-        args = arg.split()
-        if len(args) == 3:
-            plt.subplot(*[int(a) for a in args])
-        elif len(args) == 1:
-            plt.subplot(int(args[0]))
+        try:
+            args = arg.split()
+            if len(args) == 3:
+                plt.subplot(*[int(a) for a in args])
+            elif len(args) == 1:
+                plt.subplot(int(args[0]))
+        except RuntimeError:
+            print('That\'s not a valid subplot spec.')
     def do_save_plot(self, arg):
         """Save the plot currently in the plot buffer:  save_plot name.eps"""
         if MPIRANK == 0:
             if arg:
-                plt.tight_layout()
-                plt.savefig(arg, format=arg.split('.')[-1].lower())
+                try:
+                    plt.tight_layout()
+                    plt.savefig(arg, format=arg.split('.')[-1].lower())
+                except:
+                    print('Valid extensions are .png, .pdf, .ps, .eps, and '
+                          '.svg.')
             else:
                 print('Your plot needs a name.')
+    def do_add_colorbar(self, arg):
+        """Add a colorbar to your current figure, based on the most recent
+        plotted image."""
+        gcf().colorbar(self.last_im)
     @continuous
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
@@ -944,10 +955,11 @@ the heatmap.
                         operator.add,
                         [m[x][y] for m in matrices])/n_matrices)
         if self.settings['plotting']:
-            plt.imshow(avg_matrix, cmap='RdBu_r', interpolation='nearest',
-                       extent=[parsed_args.start_i, parsed_args.end_i,
-                               parsed_args.end_i, parsed_args.start_i],
-                       aspect=1, vmin=0, vmax=1)
+            self.last_im = \
+                plt.imshow(avg_matrix, cmap='jet', interpolation='nearest',
+                           extent=[parsed_args.start_i, parsed_args.end_i,
+                                   parsed_args.end_i, parsed_args.start_i],
+                           aspect=1, vmin=0, vmax=1)
             plt.tick_params(axis='both', which='both',
                             top='off', bottom='off', left='off', right='off',
                             labelbottom='off')
