@@ -20,7 +20,7 @@ import hashlib
 import argparse, os, time
 import subprocess
 import json
-import cmd
+import cmd, shlex
 import sys
 import ast
 import fcntl
@@ -31,6 +31,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg") # otherwise lack of display breaks program
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
 
@@ -563,7 +564,7 @@ class PDBDataBuffer():
                                                  i, j,
                                                  coarsep=coarsep,
                                                  bound=bound)))
-        return result
+        return np.array(result)
 
 ### Main class
 
@@ -658,7 +659,7 @@ class OurCmdLine(cmd.Cmd):
             print('{0:<20}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
         """Set or toggle a yes/no setting variable in the current session:
-  set calculation no  |  set calculation
+    set calculation no  |  set calculation
 
 Available settings are:
   caching: Whether to cache the results of calculations or not.
@@ -715,7 +716,7 @@ Available settings are:
             return [i for i in ['yes', 'no'] if i.startswith(text)]
     def do_get_timelimit(self, arg):
         """Print the current time limit set on analysis commands:
-  get_timelimit"""
+    get_timelimit"""
         if self.timelimit == 0:
             print('No timelimit')
         else:
@@ -723,7 +724,7 @@ Available settings are:
     def do_set_timelimit(self, arg):
         """Set a time limit on analysis commands, in seconds. Leave as 0 to let
 commands run indefinitely:
-  set_timelimit 600"""
+    set_timelimit 600"""
         try:
             self.timelimit = int(arg)
         except ValueError:
@@ -754,6 +755,7 @@ commands run indefinitely:
     # Plot buffer
     def do_clear_plot(self, arg):
         """Clear the plot buffer:  clear_plot"""
+        self.last_im = None
         plt.cla()
 
     ## Basic Rosetta stuff
@@ -799,21 +801,40 @@ commands run indefinitely:
             return [i for i in patches_list if i.startswith(text)]
 
     ## Plots
-    def do_plot_title(self, arg):
-        """Set the title of the current plot:  plot_title My title"""
-        plt.title(arg)
-    def do_plot_xlabel(self, arg):
-        """Set the xlabel of the current plot:  plot_xlabel My xlabel"""
-        plt.xlabel(arg)
-    def do_plot_ylabel(self, arg):
-        """Set the ylabel of the current plot:  plot_ylabel My ylabel"""
-        plt.ylabel(arg)
+    # fundamental stuff
+    def do_save_plot(self, arg):
+        """Save the plot currently in the plot buffer:  save_plot name.eps"""
+        if MPIRANK == 0:
+            if arg:
+                try:
+                    plt.savefig(arg, format=arg.split('.')[-1].lower())
+                except:
+                    print('Valid extensions are .png, .pdf, .ps, .eps, and '
+                          '.svg.')
+            else:
+                print('Your plot needs a name.')
     def do_plot_size(self, arg):
         """Set the plot size in inches:  plot_size 10 10"""
         try:
             plt.gcf().set_size_inches(*(float(x) for x in arg.split()))
         except:
             print('Provide two numbers separated by spaces.')
+    # titles and labels
+    def do_plot_title(self, arg):
+        """Set the title of the current plot:  plot_title My title"""
+        plt.title(arg)
+    def do_plot_xlabel(self, arg):
+        """Set the x axis label of the current plot:  plot_xlabel My xlabel"""
+        plt.xlabel(arg)
+    def do_plot_ylabel(self, arg):
+        """Set the y axis label of the current plot:  plot_ylabel My ylabel"""
+        plt.ylabel(arg)
+    def do_xticks(self, arg):
+        """Set the xticks on your plot, optionally specifying location.
+    xticks 'label 1' 'label 2' 'label 3' |
+    xticks ('label 1', 0.1) ('label 2', 0.2) ('label 3', 0.3)"""
+        pass # TODO
+    # subplot stuff
     def do_subplot(self, arg):
         """Create a subplot with Matlab syntax:  subplot 2 1 1"""
         try:
@@ -824,29 +845,33 @@ commands run indefinitely:
                 plt.subplot(int(args[0]))
         except RuntimeError:
             print('That\'s not a valid subplot spec.')
-    def do_save_plot(self, arg):
-        """Save the plot currently in the plot buffer:  save_plot name.eps"""
-        if MPIRANK == 0:
-            if arg:
-                try:
-                    plt.tight_layout()
-                    plt.savefig(arg, format=arg.split('.')[-1].lower())
-                except:
-                    print('Valid extensions are .png, .pdf, .ps, .eps, and '
-                          '.svg.')
-            else:
-                print('Your plot needs a name.')
+    def do_tight_layout(self, arg):
+        """Adjust subplot spacing so that there's no overlaps between
+different subplots.
+    tight_layout"""
+        plt.tight_layout()
     def do_add_colorbar(self, arg):
-        """Add a colorbar to your current figure, based on the most recent
-        plotted image."""
-        gcf().colorbar(self.last_im)
+        """Add a colorbar to your figure next to a group of subplots, for the
+most recently plotted subplot. Don't call tight_layout after this; that breaks
+everything.
+    add_colorbar"""
+        SPACE   = 0.2
+        PADDING = 0.7
+        plt.tight_layout()
+        fig = plt.gcf()
+        w,h = fig.get_size_inches()
+        fig.set_size_inches((w/(1-SPACE), h))
+        fig.subplots_adjust(right=1-SPACE)
+        cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
+                             SPACE*(1-PADDING),     0.7])
+        fig.colorbar(self.last_im, cax=cbax)
     @continuous
     def do_plot_dir_rmsd_vs_score(self, arg):
         """For each PDB in a directory, plot the RMSDs vs a particular file
 against their energy score, optionally specifying an upper bound on score:
-  plot_dir_rmsd_vs_score indir infile.pdb  |
-  plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
-  plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
+    plot_dir_rmsd_vs_score indir infile.pdb  |
+    plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
+    plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
         global PYROSETTA_ENV
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
@@ -903,8 +928,8 @@ against their energy score, optionally specifying an upper bound on score:
         """Make a heatmap of how often two residues neighbor each other in
 a given directory. You must specify the range of residues over which to create
 the heatmap.
-  plot_dir_neighbors indir 1 100  |
-  plot_dir_neighbors indir 1 100 --params ABC"""
+    plot_dir_neighbors indir 1 100  |
+    plot_dir_neighbors indir 1 100 --params ABC"""
         parser = argparse.ArgumentParser()
         parser.add_argument('in_dir',
                             action='store')
@@ -932,28 +957,12 @@ the heatmap.
                 else:
                     params.append(param+'.params')
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
-        matrices = self.data_buffer.gather_neighbors(
-                       (os.path.join(parsed_args.in_dir, filename) \
-                        for filename in filenames_in_in_dir \
-                        if filename.endswith('.pdb')),
-                       params=params)
-        def m_valid_p(m, minsize):
-            try:
-                return len(m) >= minsize and \
-                       functools.reduce(operator.and_, [len(v) >= minsize \
-                                                        for v in m])
-            except TypeError:
-                return False
-        matrices = [m for m in matrices if m_valid_p(m, parsed_args.end_i)]
-        n_matrices = float(len(matrices))
-        avg_matrix = []
-        for x in range(parsed_args.start_i-1,parsed_args.end_i):
-            avg_matrix.append([])
-            for y in range(parsed_args.start_i-1,parsed_args.end_i):
-                avg_matrix[-1].append(
-                    functools.reduce(
-                        operator.add,
-                        [m[x][y] for m in matrices])/n_matrices)
+        results = self.data_buffer.gather_neighbors(
+                      (os.path.join(parsed_args.in_dir, filename) \
+                       for filename in filenames_in_in_dir \
+                       if filename.endswith('.pdb')),
+                      params=params)
+        avg_matrix = np.mean(np.stack(results), axis=0)
         if self.settings['plotting']:
             self.last_im = \
                 plt.imshow(avg_matrix, cmap='jet', interpolation='nearest',
@@ -961,8 +970,36 @@ the heatmap.
                                    parsed_args.end_i, parsed_args.start_i],
                            aspect=1, vmin=0, vmax=1)
             plt.tick_params(axis='both', which='both',
-                            top='off', bottom='off', left='off', right='off',
-                            labelbottom='off')
+                            top='off', bottom='off', left='off', right='off')
+            # remove every other xtick:
+            ax = plt.gca()
+            ax.set_xticks(ax.get_xticks()[1:-1:2])
+    def do_plot_neighbors_bar(self, arg):
+        """Create a bar chart of a set of dirs for the average long-distance
+neighbor rate among the PDBs in those dirs. Set the labels with xticks.
+    plot_neighbors_bar dir1 dir2 dir3"""
+        values = []
+        try:
+            for pdbdir in shlex.split(arg):
+                filenames = os.listdir(pdbdir)
+                results = self.data_buffer.gather_neighbors(
+                              (os.path.join(pdbdir, filename) \
+                               for filename in filenames \
+                               if filename.endswith('.pdb')),
+                              params=params)
+                avg_matrix = np.mean(np.stack(results), axis=0)
+                # get a horizontally stacked version of matrix with middle
+                # three diagonals removed
+                N_REMOVED_DIAG = 3 # number of removed diagonals
+                stacked = np.hstack(
+                    np.hstack(avg_matrix[i][i+N_REMOVED_DIAG-1:] \
+                              for i in range(a.shape[0])),
+                    np.hstack(avg_matrix[i][:max(i-N_REMOVED_DIAG+1,0)] \
+                              for i in range(a.shape[0])))
+                values.append(np.mean(stacked))
+        except:
+            print('That\'s not a valid set of dirs.')
+        plt.bar(np.arange(len(values)), values)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
