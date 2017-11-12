@@ -16,8 +16,9 @@ interest. Most plotting commands are based on Matlab commands.
 import re
 import types, copy
 import functools, operator
+import csv
 import hashlib
-import argparse, os, time
+import os, io, time, argparse
 import subprocess
 import json
 import cmd, shlex
@@ -326,27 +327,65 @@ class PyRosettaEnv():
 
 class PDBDataBuffer():
     """Singleton class that stores information about PDBs, to be used as this
-    program's data buffer. Dict-reliant, so stringly typed. It can store the
-    following things:
+    program's data buffer. Its purpose is to intelligently abstract the
+    retrieval of information about PDBs in such a way that the information is
+    cached and/or buffered in the process. The only methods in it that should
+    ideally be used externally are the data retrieval methods, and out of those
+    ideally just the caching ones (currently get_ and gather_ methods). In
+    practice, update_caches() is also used externally to force a cache update.
 
-      - Contents hashes (in case two PDBs are identical); this is how it indexes
-        its data
-      - List of paths to PDB files that have the corresponding content hash
-      - List of mtimes for each file when its content hash was computed
-      - Scores for any combination of weights
-      - RMSD vs protein with another content hash
-      - Residue neighborhood matrices for arbitrary bounds
-      - What caches it loaded to create this buffer
+    Internally, it holds a data dict, which indexes all the data first by the
+    MD5 hash of the contents of the PDB that produced the data, then the type
+    of data it is (e.g. RMSD or score), and finally the parameters that
+    produced the data (like the particular weights on the scorefunction for a
+    score). It also holds a dict of paths to PDBs, the contents hashes of these
+    PDBs, and the mtime of the PDB at which the contents hash was produced, so
+    that if it is asked about a PDB whose hash is already known, it does not
+    need to recalculate it. Finally, it also holds a dict mapping the caches
+    it's already loaded to their mtimes at which they were loaded, so that it
+    does not load a cache unless it's changed.
 
-    It can be asked to log data for any particular calculation performed on any
-    particular PDB file. It can also be asked to verify that any particular
-    piece of data is up-to-date, and delete it when it isn't. It autonomously
-    creates cache files when performing calculations, unless this behavior is
-    turned off.
-    It is not the buffer's responsibility to keep a directory tree of
-    PDBs. That's the problem of whichever subroutine needs to know the directory
-    structure.
-    The structure of the buffer's data variables are thus:
+    On disk, the data is cached in a .paperclip_cache file that contains a JSON
+    array of the data dict and the PDB paths dict, each with only the entries
+    for the PDB files in the same folder as the cache. If caching is turned on,
+    whenever the buffer generates data for a file, it will check whether the
+    file's folder has a cache with that data yet, and if not, it will write one
+    (making sure to load any cached data in that folder that already exists).
+    Caching is done in a thread-safe manner, with file locks. Throughout the
+    reading, updating, and writing of a cache, the buffer will maintain an
+    exclusive lock on the cache, so that it doesn't get updated on disk in
+    between its reading and updating/writing, which would cause the first
+    update to get lost.
+
+    The ability to get a particular type of data is added to the buffer by
+    defining a calculate_ method. Corresponding get_ and gather_ methods are
+    created dynamically at initialization, which add caching to the calculate_
+    method, and take a filename or list of filenames instead of a file contents
+    string. For this reason, all calculate_ methods should take a contents
+    string as their first argument, and also a params keyword argument for the
+    file params.
+
+    The internal settings calculatingp and plottingp work like this:
+
+      - calculatingp = False: The buffer will only retrieve cached information,
+          never calculating its own data or saving caches. get_ operations will
+          return a KeyError if the data for a PDB is not in the caches it's
+          loaded, and gather_ operations will leave a PDB's data out of the
+          list they return if they can't find it.
+      - calculatingp = True, cachingp = False: The buffer will calculate new
+          information if it doesn't have it, but never save it. Useful if
+          real-time caching is taking too much time, and if instead you want to
+          do it manually by calling update_caches(force=True) at select times.
+          Note that with cachingp = False, update_caches() doesn't do anything
+          unless you call it with force=True. (This is the case with
+          calculatingp = False as well, making it the only real effect of
+          cachingp in that case.)
+      - calculatingp = True, cachingp = True: The buffer will calculate new
+          information if it doesn't have it, and save it to disk immediately
+          all of the time.
+
+    The structure of the buffer's data variables, although summarized above,
+    can be stated more succinctly as:
 
     self.data:
     { content_key : { data_function_name :
@@ -438,10 +477,10 @@ class PDBDataBuffer():
             self.cache_paths[absdirpath] = diskmtime
         except FileNotFoundError:
             pass
-    def update_caches(self):
+    def update_caches(self, force=False):
         """Updates the caches for every directory the cache knows about. This
         method is thread-safe."""
-        if not self.cachingp:
+        if not (self.cachingp or force):
             return
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
@@ -590,7 +629,7 @@ class OurCmdLine(cmd.Cmd):
     last_im = None
     ## The two buffers:
     data_buffer = PDBDataBuffer() # contains computed data about PDBs
-    text_buffer = ''              # contains text output
+    text_buffer = io.StringIO()   # contains text output, formatted as a TSV
     # There is also a plot buffer, but that is contained within pyplot.
 
     ## Housekeeping
@@ -665,14 +704,13 @@ class OurCmdLine(cmd.Cmd):
                                 'no'  if value == False else value
             print('{0:<20}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
-        """Set or toggle a yes/no setting variable in the current session:
+        """Set or toggle a yes/no setting variable in the current session.
     set calculation no  |  set calculation
 
 Available settings are:
   caching: Whether to cache the results of calculations or not.
   calculation: Whether to perform new calculations for values that may be
       outdated in the cache, or just use the possibly outdated cached values.
-      Turning this off disables caching, even if 'caching' is set to 'yes'.
   continuous_mode: Repeat all analysis and plotting commands until they hit the
       time limit, or forever. Useful if a program is still generating data for
       a directory, but you want to start caching now. (To set a time limit, use
@@ -722,7 +760,7 @@ Available settings are:
         elif position == 2:
             return [i for i in ['yes', 'no'] if i.startswith(text)]
     def do_get_timelimit(self, arg):
-        """Print the current time limit set on analysis commands:
+        """Print the current time limit set on analysis commands.
     get_timelimit"""
         if self.timelimit == 0:
             print('No timelimit')
@@ -730,7 +768,7 @@ Available settings are:
             print(str(self.timelimit)+' seconds')
     def do_set_timelimit(self, arg):
         """Set a time limit on analysis commands, in seconds. Leave as 0 to let
-commands run indefinitely:
+commands run indefinitely.
     set_timelimit 600"""
         try:
             self.timelimit = int(arg)
@@ -748,17 +786,59 @@ commands run indefinitely:
         self.data_buffer.cachingp     = cachingp
     def do_update_caches(self, arg):
         """Update the caches for the data buffer:  update_caches"""
-        cachingp = self.data_buffer.cachingp
-        self.data_buffer.cachingp = True
-        self.data_buffer.update_caches()
-        self.data_buffer.cachingp = cachingp
+        self.data_buffer.update_caches(force=True)
     # Text buffer
     def do_clear_text(self, arg):
         """Clear the text buffer of any text output:  clear_text"""
-        self.text_buffer = ''
+        self.text_buffer.close()
+        self.text_buffer = io.StringIO()
     def do_view_text(self, arg):
         """View the text buffer, less-style:  view_text"""
-        subprocess.run(['less'], input=bytes(self.text_buffer, 'utf-8'))
+        subprocess.run(['less'],
+                       input=bytes(self.text_buffer.getvalue(), 'utf-8'))
+    def do_save_text(self, arg):
+        parser = argparse.ArgumentParser(
+            description='Save the text buffer to a file, optionally specifying'
+                        ' a different format.')
+        parser.add_argument('path',
+                            help='Output path.')
+        parser.add_argument('--format',
+                            dest='format',
+                            nargs='?',
+                            default=None,
+                            help='Format to save text buffer in.')
+        self.do_save_text.__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+        out_format = None
+        if parsed_args.format is None:
+            last_segment = parsed_args.path.split('.')[-1]
+            if last_segment.lower() in ('tsv','csv'):
+                out_format = last_segment.lower()
+            else:
+                out_format = 'tsv'
+        else:
+            out_format = parsed_args.format.lower()
+        if out_format == 'tsv':
+            try:
+                open(parsed_args.path, 'w').write(self.text_buffer.getvalue())
+            except FileNotFoundError:
+                print('Invalid output path.')
+        elif out_format == 'csv':
+            reader = csv.reader(self.text_buffer, delimiter='\t')
+            try:
+                with open(parsed_args.path, 'w') as out_file:
+                    out_file = csv.writer(out_file)
+                    self.text_buffer.seek(0)
+                    for row in reader:
+                        out_file.writerow(row)
+            except FileNotFoundError:
+                print('Invalid output path.')
+        else:
+            print('Invalid output format.')
+            
     # Plot buffer
     def do_clear_plot(self, arg):
         """Clear the plot buffer:  clear_plot"""
@@ -807,7 +887,7 @@ commands run indefinitely:
         elif position == 2:
             return [i for i in patches_list if i.startswith(text)]
 
-    ## Plots
+    ## Matplotlib stuff
     # fundamental stuff
     def do_save_plot(self, arg):
         """Save the plot currently in the plot buffer:  save_plot name.eps"""
@@ -887,8 +967,7 @@ commands run indefinitely:
     # axes stuff
     def do_xlim(self, arg):
         """Set limits for the x axis.
-    xlim 0    1 |
-    xlim SAME 1"""
+    xlim 0 1  |  xlim SAME 1"""
         try:
             left, right = arg.split()
             left  = None if left  == 'SAME' else float(left)
@@ -899,8 +978,7 @@ commands run indefinitely:
                   'leave it the same, write "SAME".')
     def do_ylim(self, arg):
         """Set limits for the y axis.
-    ylim 0    1 |
-    ylim SAME 1"""
+    ylim 0 1  |  ylim SAME 1"""
         try:
             left, right = arg.split()
             left  = None if left  == 'SAME' else float(left)
@@ -946,33 +1024,126 @@ everything.
         cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
                              SPACE*(1-PADDING),     0.7])
         fig.colorbar(self.last_im, cax=cbax)
+    ## Calculations stuff
+    # Text
     @continuous
-    def do_plot_dir_rmsd_vs_score(self, arg):
-        """For each PDB in a directory, plot the RMSDs vs a particular file
-against their energy score, optionally specifying an upper bound on score:
-    plot_dir_rmsd_vs_score indir infile.pdb  |
-    plot_dir_rmsd_vs_score indir infile.pdb --params ABC  |
-    plot_dir_rmsd_vs_score indir infile.pdb 4.6 --style ro --params ABC"""
+    def do_table_dir_rmsd_vs_score(self, arg):
         global PYROSETTA_ENV
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(
+            description='Add a table of RMSDs vs a particular file and scores '
+                        'for a directory of PDBs to the text buffer.')
         parser.add_argument('in_dir',
-                            action='store')
+                            action='store',
+                            help='The directory to plot for.')
         parser.add_argument('in_file',
-                            action='store')
-        parser.add_argument('bound',
-                            type=float,
                             action='store',
-                            nargs='?',
-                            default=0)
-        parser.add_argument('--style',
-                            dest='style',
-                            action='store',
-                            default='ro')
+                            help='The PDB to compare with for RMSD.')
         parser.add_argument('--params',
                             dest='params',
                             action='store',
                             nargs='*',
-                            default=None)
+                            default=None,
+                            help='Params files for the PDBs.')
+        parser.add_argument('--rmsdlim',
+                            nargs='*',
+                            help='Limits on RMSD for the plot. If a side\'s '
+                                 'limit is given as NONE, that side is '
+                                 'unlimited.')
+        parser.add_argument('--scorelim',
+                            nargs='*',
+                            help='Limits on score for the plot. If a side\'s '
+                                 'limit is given as NONE, that side is '
+                                 'unlimited.')
+        parser.add_argument('--sorting',
+                            dest='sorting',
+                            action='store',
+                            default='scoreinc',
+                            help='Sorting criterion. Can be rmsddec, rmsdinc, '
+                                 'scoredec, or scoreinc.')
+        self.do_table_dir_rmsd_vs_score.__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+        filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        filenames_in_in_dir = [filename \
+                               for filename in filenames_in_in_dir \
+                               if filename.endswith('.pdb')]
+        params = None
+        if parsed_args.params:
+            params = []
+            for param in parsed_args.params:
+                if param.endswith('.params'):
+                    params.append(param)
+                else:
+                    params.append(param+'.params')
+        data = zip(filenames_in_in_dir,
+                   self.data_buffer.gather_rmsd(
+                       (os.path.join(parsed_args.in_dir, filename) \
+                        for filename in filenames_in_in_dir),
+                       parsed_args.in_file,
+                       'all_atom_rmsd',
+                       params=params),
+                   self.data_buffer.gather_score(
+                       (os.path.join(parsed_args.in_dir, filename) \
+                        for filename in filenames_in_in_dir),
+                       PYROSETTA_ENV.get_scorefxn_hash(),
+                       params=params))
+        # TODO: make lims work
+        criterion = None
+        if parsed_args.sorting.lower() == 'rmsddec':
+            criterion = lambda p: -p[1]
+        elif parsed_args.sorting.lower() == 'rmsdinc':
+            criterion = lambda p: p[1]
+        elif parsed_args.sorting.lower() == 'scoredec':
+            criterion = lambda p: -p[2]
+        elif parsed_args.sorting.lower() == 'scoreinc':
+            criterion = lambda p: p[2]
+        else:
+            print('Invalid sorting type.')
+            return
+        self.text_buffer.seek(0, io.SEEK_END)
+        writer = csv.writer(self.text_buffer, delimiter='\t')
+        writer.writerows(sorted([datapoint \
+                                 for datapoint in data \
+                                 if datapoint[2] < 0], # TODO: make lims work
+                                key=criterion))
+    # Plots
+    @continuous
+    def do_plot_dir_rmsd_vs_score(self, arg):
+        global PYROSETTA_ENV
+        parser = argparse.ArgumentParser(
+            description='For each PDB in a directory, plot the RMSDs vs a '
+            'particular file against their energy score.')
+        parser.add_argument('in_dir',
+                            action='store',
+                            help='The directory to plot for.')
+        parser.add_argument('in_file',
+                            action='store',
+                            help='The PDB to compare with for RMSD.')
+        parser.add_argument('--params',
+                            dest='params',
+                            action='store',
+                            nargs='*',
+                            default=None,
+                            help='Params files for the PDBs.')
+        parser.add_argument('--rmsdlim',
+                            nargs='*',
+                            help='Limits on RMSD for the plot. If a side\'s '
+                                 'limit is given as NONE, that side is '
+                                 'unlimited.')
+        parser.add_argument('--scorelim',
+                            nargs='*',
+                            help='Limits on score for the plot. If a side\'s '
+                                 'limit is given as NONE, that side is '
+                                 'unlimited.')
+        parser.add_argument('--style',
+                            dest='style',
+                            action='store',
+                            default='ro',
+                            help='Matlab-type style to plot points with, like '
+                                 '\'ro\' or \'b-\'.')
+        self.do_plot_dir_rmsd_vs_score.__func__.__doc__ = parser.format_help()
         try:
             parsed_args = parser.parse_args(arg.split())
         except SystemExit:
@@ -999,19 +1170,19 @@ against their energy score, optionally specifying an upper bound on score:
                             if filename.endswith('.pdb')),
                            PYROSETTA_ENV.get_scorefxn_hash(),
                            params=params)))
+        # TODO: make lims work
         rmsds,scores = zip(*(datapoint \
                              for datapoint in data \
-                             if datapoint[1] < parsed_args.bound))
+                             if datapoint[1] < 0)) # TODO: make lims work
         if self.settings['plotting']:
             plt.plot(rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
-        """Make a heatmap of how often two residues neighbor each other in
-a given directory. You must specify the range of residues over which to create
-the heatmap.
-    plot_dir_neighbors indir 1 100  |
-    plot_dir_neighbors indir 1 100 --params ABC"""
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(
+            description='Make a heatmap of how often two residues neighbor '
+                        'each other in a given directory. You must specify '
+                        'the range of residues over which to create the '
+                        'heatmap.')
         parser.add_argument('in_dir',
                             action='store')
         parser.add_argument('start_i',
@@ -1025,9 +1196,10 @@ the heatmap.
                             action='store',
                             nargs='*',
                             default=None)
+        self.do_plot_dir_neighbors.__func__.__doc__ = parser.format_help()
         try:
             parsed_args = parser.parse_args(arg.split())
-        except SystemError:
+        except SystemExit:
             return
         params = None
         if parsed_args.params:
@@ -1043,8 +1215,8 @@ the heatmap.
                        for filename in filenames_in_in_dir \
                        if filename.endswith('.pdb')),
                       params=params)
-        avg_matrix = np.mean(np.stack(results), axis=0)
         if self.settings['plotting']:
+            avg_matrix = np.mean(np.stack(results), axis=0)
             self.last_im = \
                 plt.imshow(avg_matrix, cmap='jet', interpolation='nearest',
                            extent=[parsed_args.start_i, parsed_args.end_i,
@@ -1052,7 +1224,7 @@ the heatmap.
                            aspect=1, vmin=0, vmax=1)
             plt.tick_params(axis='both', which='both',
                             top='off', bottom='off', left='off', right='off')
-            self.do_prune_xticks(None)
+            self.do_prune_xticks('')
     def do_plot_neighbors_bar(self, arg):
         """Create a bar chart of a set of dirs for the average long-distance
 neighbor rate among the PDBs in those dirs. Set the labels with xticks.
