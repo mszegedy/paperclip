@@ -170,10 +170,10 @@ def make_PDBDataBuffer_gatherer(data_name):
     """Make an accessor for a PDBDataBuffer that concurrently operates on a
     list of filenames instead of a single filename."""
     def gatherer(self_, file_list, *args, params=None, **kwargs):
-        abs_file_list = [os.path.abspath(path) for path in file_list]
+        abspaths = tuple(os.path.abspath(path) for path in file_list)
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
-            for file_path in abs_file_list:
+            for file_path in abspaths:
                 try:
                     result.append(
                         getattr(self_, 'get_'+data_name) \
@@ -207,19 +207,21 @@ def make_PDBDataBuffer_gatherer(data_name):
                         (file_info_dict['hash'], data_name, accessor_string)
                     DEBUG_OUT('just saved result for '+file_info_dict['path'])
                 for dirname in set((os.path.dirname(path) \
-                                    for path in abs_file_list)):
+                                    for path in abspaths)):
                     DEBUG_OUT('retrieving caches for '+dirname)
                     self_.retrieve_data_from_cache(dirname)
-                DEBUG_OUT('all caches retrieved.')
+                DEBUG_OUT('all caches retrieved')
+                DEBUG_OUT('abspaths:\n', abspaths)
                 while True:
                     result = MPICOMM.recv(source=MPI.ANY_SOURCE,
                                           tag=MPI.ANY_TAG,
                                           status=MPISTATUS)
                     result_source = MPISTATUS.Get_source()
                     result_tag    = MPISTATUS.Get_tag()
+                    DEBUG_OUT('data received from '+result_source)
                     # try to find a PDB we don't have the data for yet:
-                    while current_file_index < len(abs_file_list):
-                        file_path = abs_file_list[current_file_index]
+                    while current_file_index < len(abspaths):
+                        file_path = abspaths[current_file_index]
                         file_info = self_.get_pdb_file_info(file_path)
                         file_data = self_.data.setdefault(file_info.hash, {}) \
                                               .setdefault(data_name, {})
@@ -236,11 +238,14 @@ def make_PDBDataBuffer_gatherer(data_name):
                             save_result([file_info_dict,
                                          file_data[accessor_string],
                                          accessor_string])
+                            DEBUG_OUT('increasing current_file_index from %d to %d' % \
+                                      (current_file_index, current_file_index+1))
                             current_file_index += 1
                         except KeyError:
                             break
-                    if current_file_index < len(abs_file_list):
-                        DEBUG_OUT('assigning '+file_info.path)
+                    if current_file_index < len(abspaths):
+                        DEBUG_OUT('assigning ' + file_info.path+' to ' + \
+                                  result_source)
                         MPICOMM.send([file_info_dict,
                                       file_path,
                                       accessor_string],
@@ -248,8 +253,10 @@ def make_PDBDataBuffer_gatherer(data_name):
                         DEBUG_OUT('assignment sent')
                         current_file_index += 1
                     else:
+                        DEBUG_OUT('all files done. killing '+result_source)
                         MPICOMM.send(QUIT_GATHERING_SIGNAL,
                                      dest=result_source, tag=WORK_TAG)
+                        DEBUG_OUT('worker killed')
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
@@ -282,7 +289,7 @@ def make_PDBDataBuffer_gatherer(data_name):
             file_indices_dict = MPICOMM.bcast(file_indices_dict, root=0)
             # All threads should be on the same page at this point.
             retlist = []
-            for path in abs_file_list:
+            for path in abspaths:
                 indices = file_indices_dict[path]
                 retlist.append(self_.data[indices[0]][indices[1]][indices[2]])
             return retlist
@@ -832,8 +839,82 @@ commands run indefinitely:
     def do_xticks(self, arg):
         """Set the xticks on your plot, optionally specifying location.
     xticks 'label 1' 'label 2' 'label 3' |
-    xticks ('label 1', 0.1) ('label 2', 0.2) ('label 3', 0.3)"""
-        pass # TODO
+    xticks label\ 1  label\ 2  label\ 3  |
+    xticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)"""
+        tick_indices = []
+        tick_labels  = []
+        try:
+            parsed = ast.literal_eval(arg)
+            try:
+                tick_labels, tick_indices = zip(parsed)
+                tick_indices = np.array(tick_indices)
+            except:
+                print('Malformed input. See examples in help.')
+        except SyntaxError:
+            try:
+                parsed = ast.literal_eval("'"+"','".join(shlex.split(arg))+"'")
+                tick_indices = np.arange(len(parsed))
+                tick_labels = parsed
+            except:
+                print('Malformed input. See examples in help.')
+        plt.xticks(tick_indices, tick_labels)
+    def do_yticks(self, arg):
+        """Set the xticks on your plot, optionally specifying location.
+    yticks 'label 1' 'label 2' 'label 3' |
+    yticks label\ 1  label\ 2  label\ 3  |
+    yticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)"""
+        tick_indices = []
+        tick_labels  = []
+        try:
+            parsed = ast.literal_eval(arg)
+            try:
+                tick_labels, tick_indices = zip(parsed)
+                tick_indices = np.array(tick_indices)
+            except:
+                print('Malformed input. See examples in help.')
+        except SyntaxError:
+            try:
+                parsed = ast.literal_eval("'"+"','".join(shlex.split(arg))+"'")
+                tick_indices = np.arange(len(parsed))
+                tick_labels = parsed
+            except:
+                print('Malformed input. See examples in help.')
+        plt.yticks(tick_indices, tick_labels)
+    def do_prune_xticks(self, arg):
+        """Remove every other xtick:  prune_xticks"""
+        ax = plt.gca()
+        ax.set_xticks(ax.get_xticks()[1:-1:2])
+    # axes stuff
+    def do_xlim(self, arg):
+        """Set limits for the x axis.
+    xlim 0    1 |
+    xlim SAME 1"""
+        try:
+            left, right = arg.split()
+            left  = None if left  == 'SAME' else float(left)
+            right = None if right == 'SAME' else float(right)
+            plt.gca().set_xlim(left=left, right=right)
+        except ValueError:
+            print('Specify a value for each side of the limits. If you want to'
+                  'leave it the same, write "SAME".')
+    def do_ylim(self, arg):
+        """Set limits for the y axis.
+    ylim 0    1 |
+    ylim SAME 1"""
+        try:
+            left, right = arg.split()
+            left  = None if left  == 'SAME' else float(left)
+            right = None if right == 'SAME' else float(right)
+            plt.gca().set_ylim(left=left, right=right)
+        except ValueError:
+            print('Specify a value for each side of the limits. If you want to'
+                  'leave it the same, write "SAME".')
+    def do_invert_xaxis(self, arg):
+        """Invert the current axes' x axis:  invert_xaxis"""
+        plt.gca().invert_xaxis()
+    def do_invert_yaxis(self, arg):
+        """Invert the current axes' y axis:  invert_yaxis"""
+        plt.gca().invert_yaxis()
     # subplot stuff
     def do_subplot(self, arg):
         """Create a subplot with Matlab syntax:  subplot 2 1 1"""
@@ -971,16 +1052,23 @@ the heatmap.
                            aspect=1, vmin=0, vmax=1)
             plt.tick_params(axis='both', which='both',
                             top='off', bottom='off', left='off', right='off')
-            # remove every other xtick:
-            ax = plt.gca()
-            ax.set_xticks(ax.get_xticks()[1:-1:2])
+            self.do_prune_xticks(None)
     def do_plot_neighbors_bar(self, arg):
         """Create a bar chart of a set of dirs for the average long-distance
 neighbor rate among the PDBs in those dirs. Set the labels with xticks.
-    plot_neighbors_bar dir1 dir2 dir3"""
+    plot_neighbors_bar dir1 dir2 dir3 |
+    plot_neighbors_bar dir1 dir2 dir3 --params ABC"""
+        parsed = shlex.split(arg)
+        params = None
+        try:
+            params_index = parsed.index('--params')
+            params = parsed[params_index+1:]
+            parsed = parsed[:params_index]
+        except ValueError:
+            pass
         values = []
         try:
-            for pdbdir in shlex.split(arg):
+            for pdbdir in parsed:
                 filenames = os.listdir(pdbdir)
                 results = self.data_buffer.gather_neighbors(
                               (os.path.join(pdbdir, filename) \
@@ -989,17 +1077,18 @@ neighbor rate among the PDBs in those dirs. Set the labels with xticks.
                               params=params)
                 avg_matrix = np.mean(np.stack(results), axis=0)
                 # get a horizontally stacked version of matrix with middle
-                # three diagonals removed
-                N_REMOVED_DIAG = 3 # number of removed diagonals
+                # five diagonals removed
+                N_REMOVED_DIAG = 5 # number of removed diagonals; must be odd
                 stacked = np.hstack(
-                    np.hstack(avg_matrix[i][i+N_REMOVED_DIAG-1:] \
-                              for i in range(a.shape[0])),
-                    np.hstack(avg_matrix[i][:max(i-N_REMOVED_DIAG+1,0)] \
-                              for i in range(a.shape[0])))
+                    [np.hstack(avg_matrix[i][i+N_REMOVED_DIAG//2+1:] \
+                               for i in range(avg_matrix.shape[0])),
+                     np.hstack(avg_matrix[i][:max(i-N_REMOVED_DIAG//2,0)] \
+                               for i in range(avg_matrix.shape[0]))])
                 values.append(np.mean(stacked))
         except:
             print('That\'s not a valid set of dirs.')
-        plt.bar(np.arange(len(values)), values)
+        if self.settings['plotting']:
+            plt.barh(np.arange(len(values)), values, align='center')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
