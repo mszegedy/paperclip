@@ -30,7 +30,7 @@ import timeout_decorator
 from mpi4py import MPI
 import numpy as np
 import matplotlib
-matplotlib.use("Agg") # otherwise lack of display breaks program
+matplotlib.use('Agg') # otherwise lack of display breaks program
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pyrosetta as pr
@@ -55,7 +55,7 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
 ### Decorators
 
 def needs_pr_init(f):
-    """Makes sure PyRosetta gets initialized before f is called."""
+    '''Makes sure PyRosetta gets initialized before f is called.'''
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
@@ -66,9 +66,9 @@ def needs_pr_init(f):
         return f(*args, **kwargs)
     return decorated
 def needs_pr_scorefxn(f):
-    """Makes sure the scorefxn exists before f is called. (In order for the
+    '''Makes sure the scorefxn exists before f is called. (In order for the
     scorefxn to exist, pr.init() needs to have been called, so @needs_pr_init
-    is unnecessary in front of this.)"""
+    is unnecessary in front of this.)'''
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         global PYROSETTA_ENV
@@ -78,7 +78,7 @@ def needs_pr_scorefxn(f):
         return f(*args, **kwargs)
     return decorated
 def times_out(f):
-    """Makes a function time out after it hits self.timelimit."""
+    '''Makes a function time out after it hits self.timelimit.'''
     @functools.wraps(f)
     def decorated(self_, *args, **kwargs):
         if self_.timelimit:
@@ -91,8 +91,8 @@ def times_out(f):
             return f(self_, *args, **kwargs)
     return decorated
 def continuous(f):
-    """Makes a function in OurCmdLine repeat forever when continuous mode is
-    enabled, and decorates it with times_out."""
+    '''Makes a function in OurCmdLine repeat forever when continuous mode is
+    enabled, and decorates it with times_out.'''
     @functools.wraps(f)
     @times_out
     def decorated(self_, *args, **kwargs):
@@ -111,8 +111,8 @@ def DEBUG_OUT(*args, **kwargs):
         print(*args, **kwargs)
 def get_filenames_from_dir_with_extension(dir_path, extension,
                                           strip_extensions_p=False):
-    """Returns a list of files from a directory with the path stripped, and
-    optionally the extension stripped as well."""
+    '''Returns a list of files from a directory with the path stripped, and
+    optionally the extension stripped as well.'''
     path_list = str(subprocess.check_output('ls '+os.path.join(dir_path,
                                                                '*'+extension),
                                             shell=True)).split('\\n')
@@ -130,7 +130,7 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             if m is not None]
 
 def make_PDBDataBuffer_accessor(data_name):
-    """Create an accessor function for a PDBDataBuffer data type."""
+    '''Create an accessor function for a PDBDataBuffer data type.'''
     # Python duck typing philosophy says we shouldn't do any explicit
     # checking of the thing stored at the attribute, but in any case,
     # it should be a function that takes a pdb_contents string as its
@@ -168,8 +168,8 @@ def make_PDBDataBuffer_accessor(data_name):
     return accessor
 
 def make_PDBDataBuffer_gatherer(data_name):
-    """Make an accessor for a PDBDataBuffer that concurrently operates on a
-    list of filenames instead of a single filename."""
+    '''Make an accessor for a PDBDataBuffer that concurrently operates on a
+    list of filenames instead of a single filename.'''
     def gatherer(self_, file_list, *args, params=None, **kwargs):
         abspaths = tuple(os.path.abspath(path) for path in file_list)
         if MPISIZE == 1 or not self_.calculatingp:
@@ -302,15 +302,15 @@ def make_PDBDataBuffer_gatherer(data_name):
 ### Housekeeping classes
 
 class PyRosettaEnv():
-    """Stores stuff relating to PyRosetta, like whether pr.init() has been
-    called."""
+    '''Stores stuff relating to PyRosetta, like whether pr.init() has been
+    called.'''
     def __init__(self):
         self.initp = False
         self.scorefxn = None
     @needs_pr_init
     def set_scorefxn(self, name=None, patch=None):
-        """Sets the scorefxn and optionally applies a patch. Defaults to
-        get_fa_scorefxn() with no arguments."""
+        '''Sets the scorefxn and optionally applies a patch. Defaults to
+        get_fa_scorefxn() with no arguments.'''
         if name is None:
             self.scorefxn = pr.get_fa_scorefxn()
         else:
@@ -319,14 +319,14 @@ class PyRosettaEnv():
             self.scorefxn.apply_patch_from_file(patch)
     @needs_pr_scorefxn
     def get_scorefxn_hash(self):
-        """Gets a hash of the properties of the current scorefxn."""
+        '''Gets a hash of the properties of the current scorefxn.'''
         hash_fun = hashlib.md5()
         weights = self.scorefxn.weights()
         hash_fun.update(weights.weighted_string_of(weights).encode())
         return hash_fun.hexdigest()
 
 class PDBDataBuffer():
-    """Singleton class that stores information about PDBs, to be used as this
+    '''Singleton class that stores information about PDBs, to be used as this
     program's data buffer. Its purpose is to intelligently abstract the
     retrieval of information about PDBs in such a way that the information is
     cached and/or buffered in the process. The only methods in it that should
@@ -395,7 +395,7 @@ class PDBDataBuffer():
                         'hash'  : contents_hash } }
     self.cache_paths:
     { cache_file_dir_path : mtime_at_last_access }
-    """
+    '''
     ## Core functionality
     def __init__(self):
         self.calculatingp = True
@@ -416,9 +416,9 @@ class PDBDataBuffer():
                     types.MethodType(make_PDBDataBuffer_gatherer(data_name),
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
-        """Retrieves data from a cache file of a directory. The data in the
+        '''Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
-        file paths, it has just filenames."""
+        file paths, it has just filenames.'''
         absdirpath = os.path.abspath(dirpath)
         try:
             cache_path = os.path.join(absdirpath, '.paperclip_cache')
@@ -478,8 +478,8 @@ class PDBDataBuffer():
         except FileNotFoundError:
             pass
     def update_caches(self, force=False):
-        """Updates the caches for every directory the cache knows about. This
-        method is thread-safe."""
+        '''Updates the caches for every directory the cache knows about. This
+        method is thread-safe.'''
         if not (self.cachingp or force):
             return
         dir_paths = {}
@@ -520,12 +520,12 @@ class PDBDataBuffer():
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
             self.changed_dirs = set()
     def get_pdb_file_info(self, path):
-        """Returns an object that in theory contains the absolute path, mtime, contents
+        '''Returns an object that in theory contains the absolute path, mtime, contents
         hash, and maybe contents of a PDB. The first three are accessed
         directly, while the last is accessed via an accessor method, so that it
         can be retrieved if necessary. Creating and updating the object both
         update the external PDBDataBuffer's info on that pdb.
-        """
+        '''
         class PDBFileInfo():
             def __init__(self_, path_):
                 self_.path = os.path.abspath(path_)
@@ -555,7 +555,7 @@ class PDBDataBuffer():
     ## Auxiliary stuff
     @needs_pr_init
     def get_pdb_contents_pose(self, contents, params=None):
-        """Returns a Pose of a given pdb file contents string."""
+        '''Returns a Pose of a given pdb file contents string.'''
         pose = None
         if params:
             pose = mpre.pose_from_pdbstring_with_params(contents, params)
@@ -573,18 +573,18 @@ class PDBDataBuffer():
     # controlled if there are multiple processors available.
     @needs_pr_init
     def calculate_score(self, contents, scorefxn_hash, params=None):
-        """Calculates the score of a protein based on the provided contents of
+        '''Calculates the score of a protein based on the provided contents of
         its PDB file. scorefxn_hash is not used inside the calculation, but is
         used for indexing into the buffer.
-        """
+        '''
         global PYROSETTA_ENV
         pose = self.get_pdb_contents_pose(contents, params)
         return PYROSETTA_ENV.scorefxn(pose)
     @needs_pr_init
     def calculate_rmsd(self, lhs_contents, rhs_path, rmsd_type,
                                       params=None):
-        """Calculates the RMSD of two proteins from each other and stores
-        it, without assuming commutativity."""
+        '''Calculates the RMSD of two proteins from each other and stores
+        it, without assuming commutativity.'''
         pose_lhs = self.get_pdb_contents_pose(lhs_contents, params=params)
         pose_rhs = self.get_pdb_contents_pose(self.get_pdb_file_info(rhs_path) \
                                                   .get_contents(),
@@ -593,8 +593,8 @@ class PDBDataBuffer():
     @needs_pr_init
     def calculate_neighbors(self, contents, coarsep=False, bound=None,
                             params=None):
-        """Calculates the residue neighborhood matrix of a protein based on the
-        provided contents of its PDB file."""
+        '''Calculates the residue neighborhood matrix of a protein based on the
+        provided contents of its PDB file.'''
         pose = self.get_pdb_contents_pose(contents, params=params)
         result = []
         n_residues = pose.size()
@@ -615,7 +615,7 @@ class PDBDataBuffer():
 ### Main class
 
 class OurCmdLine(cmd.Cmd):
-    """Singleton class for our interactive CLI."""
+    '''Singleton class for our interactive CLI.'''
     ## Built-in vars
     intro = 'Welcome to PAPERCLIP. Type help or ? to list commands.'
     prompt = '* '
@@ -634,33 +634,33 @@ class OurCmdLine(cmd.Cmd):
 
     ## Housekeeping
     def do_quit(self, arg):
-        """Stop recording and exit:  quit"""
+        '''Stop recording and exit:  quit'''
         self.close()
         return True
     def do_bye(self, arg):
-        """Stop recording and exit:  bye"""
+        '''Stop recording and exit:  bye'''
         return self.do_quit(arg)
     def do_EOF(self, arg):
-        """Stop recording and exit:  EOF  |  ^D"""
+        '''Stop recording and exit:  EOF  |  ^D'''
         return self.do_quit(arg)
     def do_exit(self, arg):
-        """Stop recording and exit:  exit"""
+        '''Stop recording and exit:  exit'''
         return self.do_quit(arg)
     def emptyline(self):
         pass
 
     ## Parsing
     def get_arg_position(self, text, line):
-        """For completion; gets index of current positional argument (returns 1 for
-        first arg, 2 for second arg, etc.)."""
+        '''For completion; gets index of current positional argument (returns 1 for
+        first arg, 2 for second arg, etc.).'''
         return len(line.split()) - (text != '')
 
     ## Recording and playing back commands
     def do_record(self, arg):
-        """Save future commands to filename:  record plot.cmd"""
+        '''Save future commands to filename:  record plot.cmd'''
         self.cmdfile = open(arg, 'w')
     def do_playback(self, arg):
-        """Play back commands from a file:  playback plot.cmd"""
+        '''Play back commands from a file:  playback plot.cmd'''
         self.close()
         with open(arg) as f:
             self.cmdqueue.extend(f.read().splitlines())
@@ -675,36 +675,36 @@ class OurCmdLine(cmd.Cmd):
 
     ## Shell stuff
     def do_shell(self, arg):
-        """Call a shell command:  shell echo 'Hello'  |  !echo 'Hello'"""
+        '''Call a shell command:  shell echo 'Hello'  |  !echo 'Hello''''
         os.system(arg)
     def do_cd(self, arg):
-        """Change the current working directory:  cd dir"""
+        '''Change the current working directory:  cd dir'''
         try:
             os.chdir(arg)
         except FileNotFoundError:
             print('No such file or directory: ' + arg)
     def do_mv(self, arg):
-        """Call the shell command mv:  mv a b"""
+        '''Call the shell command mv:  mv a b'''
         self.do_shell('mv ' + arg)
     def do_rm(self, arg):
-        """Call the shell command rm:  rm a"""
+        '''Call the shell command rm:  rm a'''
         self.do_shell('rm ' + arg)
     def do_ls(self, arg):
-        """Call the shell command ls:  ls .."""
+        '''Call the shell command ls:  ls ..'''
         self.do_shell('ls ' + arg)
     def do_pwd(self, arg):
-        """Get the current working directory:  pwd"""
+        '''Get the current working directory:  pwd'''
         os.getcwd()
 
     ## Settings
     def do_get_settings(self, arg):
-        """Print settings of current session:  get_settings"""
+        '''Print settings of current session:  get_settings'''
         for key, value in self.settings.items():
             transformed_value = 'yes' if value == True else \
                                 'no'  if value == False else value
             print('{0:<20}{1:>8}'.format(key+':', transformed_value))
     def do_set(self, arg):
-        """Set or toggle a yes/no setting variable in the current session.
+        '''Set or toggle a yes/no setting variable in the current session.
     set calculation no  |  set calculation
 
 Available settings are:
@@ -717,7 +717,7 @@ Available settings are:
       the command 'set_timelimit'.)
   plotting: Whether to actually output plots, or to just perform and cache the
       calculations for them. Disabling both this and 'calculation' makes most
-      analysis and plotting commands do nothing."""
+      analysis and plotting commands do nothing.'''
         args = arg.split()
         varname  = None
         varvalue = None
@@ -760,40 +760,40 @@ Available settings are:
         elif position == 2:
             return [i for i in ['yes', 'no'] if i.startswith(text)]
     def do_get_timelimit(self, arg):
-        """Print the current time limit set on analysis commands.
-    get_timelimit"""
+        '''Print the current time limit set on analysis commands.
+    get_timelimit'''
         if self.timelimit == 0:
             print('No timelimit')
         else:
             print(str(self.timelimit)+' seconds')
     def do_set_timelimit(self, arg):
-        """Set a time limit on analysis commands, in seconds. Leave as 0 to let
+        '''Set a time limit on analysis commands, in seconds. Leave as 0 to let
 commands run indefinitely.
-    set_timelimit 600"""
+    set_timelimit 600'''
         try:
             self.timelimit = int(arg)
         except ValueError:
-            print("Enter an integer value of seconds.")
+            print('Enter an integer value of seconds.')
 
     ## Buffer interaction
     # Data buffer
     def do_clear_data(self, arg):
-        """Clear the data buffer of any data:  clear_data"""
+        '''Clear the data buffer of any data:  clear_data'''
         calculatingp = self.data_buffer.calculatingp
         cachingp     = self.data_buffer.cachingp
         self.data_buffer = PDBDataBuffer()
         self.data_buffer.calculatingp = calculatingp
         self.data_buffer.cachingp     = cachingp
     def do_update_caches(self, arg):
-        """Update the caches for the data buffer:  update_caches"""
+        '''Update the caches for the data buffer:  update_caches'''
         self.data_buffer.update_caches(force=True)
     # Text buffer
     def do_clear_text(self, arg):
-        """Clear the text buffer of any text output:  clear_text"""
+        '''Clear the text buffer of any text output:  clear_text'''
         self.text_buffer.close()
         self.text_buffer = io.StringIO()
     def do_view_text(self, arg):
-        """View the text buffer, less-style:  view_text"""
+        '''View the text buffer, less-style:  view_text'''
         subprocess.run(['less'],
                        input=bytes(self.text_buffer.getvalue(), 'utf-8'))
     def do_save_text(self, arg):
@@ -841,21 +841,21 @@ commands run indefinitely.
             
     # Plot buffer
     def do_clear_plot(self, arg):
-        """Clear the plot buffer:  clear_plot"""
+        '''Clear the plot buffer:  clear_plot'''
         self.last_im = None
         plt.cla()
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
-        """Print the name of the current scorefxn, if any:  get_scorefxn"""
+        '''Print the name of the current scorefxn, if any:  get_scorefxn'''
         global PYROSETTA_ENV
         if PYROSETTA_ENV.scorefxn is None:
             print('No scorefxn currently set.')
         else:
             print(PYROSETTA_ENV.scorefxn.get_name())
     def do_set_scorefxn(self, arg):
-        """Set the current scorefxn, optionally applying a patchfile:
-    set_scorefxn ref2015  |  set_scorefxn ref2015 docking"""
+        '''Set the current scorefxn, optionally applying a patchfile:
+    set_scorefxn ref2015  |  set_scorefxn ref2015 docking'''
         global PYROSETTA_ENV
         args = arg.split()
         name = None
@@ -890,7 +890,7 @@ commands run indefinitely.
     ## Matplotlib stuff
     # fundamental stuff
     def do_save_plot(self, arg):
-        """Save the plot currently in the plot buffer:  save_plot name.eps"""
+        '''Save the plot currently in the plot buffer:  save_plot name.eps'''
         if MPIRANK == 0:
             if arg:
                 try:
@@ -901,26 +901,26 @@ commands run indefinitely.
             else:
                 print('Your plot needs a name.')
     def do_plot_size(self, arg):
-        """Set the plot size in inches:  plot_size 10 10"""
+        '''Set the plot size in inches:  plot_size 10 10'''
         try:
             plt.gcf().set_size_inches(*(float(x) for x in arg.split()))
         except:
             print('Provide two numbers separated by spaces.')
     # titles and labels
     def do_plot_title(self, arg):
-        """Set the title of the current plot:  plot_title My title"""
+        '''Set the title of the current plot:  plot_title My title'''
         plt.title(arg)
     def do_plot_xlabel(self, arg):
-        """Set the x axis label of the current plot:  plot_xlabel My xlabel"""
+        '''Set the x axis label of the current plot:  plot_xlabel My xlabel'''
         plt.xlabel(arg)
     def do_plot_ylabel(self, arg):
-        """Set the y axis label of the current plot:  plot_ylabel My ylabel"""
+        '''Set the y axis label of the current plot:  plot_ylabel My ylabel'''
         plt.ylabel(arg)
     def do_xticks(self, arg):
-        """Set the xticks on your plot, optionally specifying location.
+        '''Set the xticks on your plot, optionally specifying location.
     xticks 'label 1' 'label 2' 'label 3' |
     xticks label\ 1  label\ 2  label\ 3  |
-    xticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)"""
+    xticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
         tick_indices = []
         tick_labels  = []
         try:
@@ -932,17 +932,17 @@ commands run indefinitely.
                 print('Malformed input. See examples in help.')
         except SyntaxError:
             try:
-                parsed = ast.literal_eval("'"+"','".join(shlex.split(arg))+"'")
+                parsed = ast.literal_eval('\''+'\',\''.join(shlex.split(arg))+'\'')
                 tick_indices = np.arange(len(parsed))
                 tick_labels = parsed
             except:
                 print('Malformed input. See examples in help.')
         plt.xticks(tick_indices, tick_labels)
     def do_yticks(self, arg):
-        """Set the xticks on your plot, optionally specifying location.
+        '''Set the xticks on your plot, optionally specifying location.
     yticks 'label 1' 'label 2' 'label 3' |
     yticks label\ 1  label\ 2  label\ 3  |
-    yticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)"""
+    yticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
         tick_indices = []
         tick_labels  = []
         try:
@@ -954,20 +954,20 @@ commands run indefinitely.
                 print('Malformed input. See examples in help.')
         except SyntaxError:
             try:
-                parsed = ast.literal_eval("'"+"','".join(shlex.split(arg))+"'")
+                parsed = ast.literal_eval('\''+'\',\''.join(shlex.split(arg))+'\'')
                 tick_indices = np.arange(len(parsed))
                 tick_labels = parsed
             except:
                 print('Malformed input. See examples in help.')
         plt.yticks(tick_indices, tick_labels)
     def do_prune_xticks(self, arg):
-        """Remove every other xtick:  prune_xticks"""
+        '''Remove every other xtick:  prune_xticks'''
         ax = plt.gca()
         ax.set_xticks(ax.get_xticks()[1:-1:2])
     # axes stuff
     def do_xlim(self, arg):
-        """Set limits for the x axis.
-    xlim 0 1  |  xlim SAME 1"""
+        '''Set limits for the x axis.
+    xlim 0 1  |  xlim SAME 1'''
         try:
             left, right = arg.split()
             left  = None if left  == 'SAME' else float(left)
@@ -977,8 +977,8 @@ commands run indefinitely.
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
     def do_ylim(self, arg):
-        """Set limits for the y axis.
-    ylim 0 1  |  ylim SAME 1"""
+        '''Set limits for the y axis.
+    ylim 0 1  |  ylim SAME 1'''
         try:
             left, right = arg.split()
             left  = None if left  == 'SAME' else float(left)
@@ -988,14 +988,14 @@ commands run indefinitely.
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
     def do_invert_xaxis(self, arg):
-        """Invert the current axes' x axis:  invert_xaxis"""
+        '''Invert the current axes' x axis:  invert_xaxis'''
         plt.gca().invert_xaxis()
     def do_invert_yaxis(self, arg):
-        """Invert the current axes' y axis:  invert_yaxis"""
+        '''Invert the current axes' y axis:  invert_yaxis'''
         plt.gca().invert_yaxis()
     # subplot stuff
     def do_subplot(self, arg):
-        """Create a subplot with Matlab syntax:  subplot 2 1 1"""
+        '''Create a subplot with Matlab syntax:  subplot 2 1 1'''
         try:
             args = arg.split()
             if len(args) == 3:
@@ -1005,15 +1005,15 @@ commands run indefinitely.
         except RuntimeError:
             print('That\'s not a valid subplot spec.')
     def do_tight_layout(self, arg):
-        """Adjust subplot spacing so that there's no overlaps between
+        '''Adjust subplot spacing so that there's no overlaps between
 different subplots.
-    tight_layout"""
+    tight_layout'''
         plt.tight_layout()
     def do_add_colorbar(self, arg):
-        """Add a colorbar to your figure next to a group of subplots, for the
+        '''Add a colorbar to your figure next to a group of subplots, for the
 most recently plotted subplot. Don't call tight_layout after this; that breaks
 everything.
-    add_colorbar"""
+    add_colorbar'''
         SPACE   = 0.2
         PADDING = 0.7
         plt.tight_layout()
@@ -1226,10 +1226,10 @@ everything.
                             top='off', bottom='off', left='off', right='off')
             self.do_prune_xticks('')
     def do_plot_neighbors_bar(self, arg):
-        """Create a bar chart of a set of dirs for the average long-distance
+        '''Create a bar chart of a set of dirs for the average long-distance
 neighbor rate among the PDBs in those dirs. Set the labels with xticks.
     plot_neighbors_bar dir1 dir2 dir3 |
-    plot_neighbors_bar dir1 dir2 dir3 --params ABC"""
+    plot_neighbors_bar dir1 dir2 dir3 --params ABC'''
         parsed = shlex.split(arg)
         params = None
         try:
@@ -1262,28 +1262,28 @@ neighbor rate among the PDBs in those dirs. Set the labels with xticks.
         if self.settings['plotting']:
             plt.barh(np.arange(len(values)), values, align='center')
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description = "Interactive command-line interface for plotting and "
-                      "analysis of batches of PDB files.")
-    parser.add_argument("--background",
-                        dest="backgroundp",
-                        action="store_true",
-                        help="Run given script in background and then "
-                             "terminate. If no script is given, just do "
-                             "nothing and terminate.")
-    parser.add_argument("--continuous",
-                        dest="continuousp",
-                        action="store_true",
-                        help="Re-run caching operations until they hit the "
-                             "time limit or forever. By default, suppresses "
-                             "plots.")
-    parser.add_argument("script",
-                        action="store",
+        description = 'Interactive command-line interface for plotting and '
+                      'analysis of batches of PDB files.')
+    parser.add_argument('--background',
+                        dest='backgroundp',
+                        action='store_true',
+                        help='Run given script in background and then '
+                             'terminate. If no script is given, just do '
+                             'nothing and terminate.')
+    parser.add_argument('--continuous',
+                        dest='continuousp',
+                        action='store_true',
+                        help='Re-run caching operations until they hit the '
+                             'time limit or forever. By default, suppresses '
+                             'plots.')
+    parser.add_argument('script',
+                        action='store',
                         nargs='?',
                         default=None,
-                        help=".cmd file to run before entering interactive "
-                             "mode.")
+                        help='.cmd file to run before entering interactive '
+                             'mode.')
     parsed_args = parser.parse_args()
     PYROSETTA_ENV = PyRosettaEnv()
     OURCMDLINE = OurCmdLine()
