@@ -128,9 +128,17 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             for m \
             in [stripper.search(path) for path in path_list] \
             if m is not None]
+def process_limits(limits):
+    '''Processes a limits arg for the cmd object. Returns a list of
+    [lower_limit, upper_limit]. Sadly still has to be wrapped in a try/catch on
+    the outside.'''
+    return [(None if val.lower() in ('same', 'unbound', 'none') \
+             else float(val)) \
+            for val in limits]
 
-def make_PDBDataBuffer_accessor(data_name):
-    '''Create an accessor function for a PDBDataBuffer data type.'''
+# functions to generate different types of accessors for PDBDataBuffer
+def make_PDBDataBuffer_get(data_name):
+    '''Create a get_ accessor function for a PDBDataBuffer data type.'''
     # Python duck typing philosophy says we shouldn't do any explicit
     # checking of the thing stored at the attribute, but in any case,
     # it should be a function that takes a pdb_contents string as its
@@ -140,7 +148,7 @@ def make_PDBDataBuffer_accessor(data_name):
     #       to get_score().
     # TODO: Fix this so that calculate_rmsd() can take a contents
     #       hash, rather than a path.
-    def accessor(self_, file_path, *args, params=None, **kwargs):
+    def get(self_, file_path, *args, params=None, **kwargs):
         self_.retrieve_data_from_cache(os.path.dirname(file_path))
         file_info = self_.get_pdb_file_info(file_path)
         file_data = self_.data.setdefault(file_info.hash, {}) \
@@ -162,15 +170,15 @@ def make_PDBDataBuffer_accessor(data_name):
                 return file_data[accessor_string]
             else:
                 raise KeyError('That file\'s not in the cache.')
-    accessor.__name__ = 'get_'+data_name
-    accessor.__doc__  = 'Call calculate_'+data_name+ \
-                        '() on a file path with caching magic.'
-    return accessor
+    get.__name__ = 'get_'+data_name
+    get.__doc__  = 'Call calculate_'+data_name+ \
+                   '() on a file path with caching magic.'
+    return get
 
-def make_PDBDataBuffer_gatherer(data_name):
-    '''Make an accessor for a PDBDataBuffer that concurrently operates on a
-    list of filenames instead of a single filename.'''
-    def gatherer(self_, file_list, *args, params=None, **kwargs):
+def make_PDBDataBuffer_gather(data_name):
+    '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
+    on a list of filenames instead of a single filename.'''
+    def gather(self_, file_list, *args, params=None, **kwargs):
         abspaths = tuple(os.path.abspath(path) for path in file_list)
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
@@ -294,10 +302,10 @@ def make_PDBDataBuffer_gatherer(data_name):
                 indices = file_indices_dict[path]
                 retlist.append(self_.data[indices[0]][indices[1]][indices[2]])
             return retlist
-    gatherer.__name__ = 'gather_'+data_name
-    gatherer.__doc__  = 'Call calculate_'+data_name+ \
-                        '() on a list of file paths with concurrency magic.'
-    return gatherer
+    gather.__name__ = 'gather_'+data_name
+    gather.__doc__  = 'Call calculate_'+data_name+ \
+                      '() on a list of file paths with concurrency magic.'
+    return gather
 
 ### Housekeeping classes
 
@@ -410,10 +418,9 @@ class PDBDataBuffer():
                           for attribute_name in attribute_names \
                           if attribute_name.startswith('calculate_')):
             setattr(self, 'get_'+data_name,
-                    types.MethodType(make_PDBDataBuffer_accessor(data_name),
-                                     self))
+                    types.MethodType(make_PDBDataBuffer_get(data_name), self))
             setattr(self, 'gather_'+data_name,
-                    types.MethodType(make_PDBDataBuffer_gatherer(data_name),
+                    types.MethodType(make_PDBDataBuffer_gather(data_name),
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
         '''Retrieves data from a cache file of a directory. The data in the
@@ -649,6 +656,39 @@ class OurCmdLine(cmd.Cmd):
     def emptyline(self):
         pass
 
+    ## Making argparse-generated docs work
+    def preloop(self):
+        # Most of the following was copied from the original cmd.py with very
+        # little modification; I hereby absolve myself of any responsibility
+        # regarding it
+        names = self.get_names()
+        cmds_undoc = []
+        help = set()
+        for name in names:
+            if name[:5] == 'help_':
+                help.add(name[5:])
+        names.sort()
+        # There can be duplicates if routines overridden
+        prevname = ''
+        for name in names:
+            if name[:3] == 'do_':
+                if name == prevname:
+                    continue
+                prevname = name
+                cmd=name[3:]
+                if not ((cmd in help) or (getattr(self, name).__doc__)):
+                    cmds_undoc.append(cmd)
+        # This is my code. It runs the undocumented flags with the '-h' flag
+        # and output silenced, which allows the command's __doc__ to be
+        # overwritten but not the rest of the script to be executed (since in
+        # that case, the parse_args() line throws a SystemExit exception, which
+        # I manually catch and turn into a return).
+        with open(os.devnull, 'w') as DEVNULL:
+            sys.stdout = DEVNULL
+            for cmd in cmds_undoc:
+                self.onecmd(cmd+' -h')
+        sys.stdout = STDOUT
+
     ## Parsing
     def get_arg_position(self, text, line):
         '''For completion; gets index of current positional argument (returns 1 for
@@ -675,7 +715,7 @@ class OurCmdLine(cmd.Cmd):
 
     ## Shell stuff
     def do_shell(self, arg):
-        '''Call a shell command:  shell echo 'Hello'  |  !echo 'Hello''''
+        '''Call a shell command:  shell echo 'Hello'  |  !echo 'Hello' '''
         os.system(arg)
     def do_cd(self, arg):
         '''Change the current working directory:  cd dir'''
@@ -1089,7 +1129,7 @@ everything.
                         for filename in filenames_in_in_dir),
                        PYROSETTA_ENV.get_scorefxn_hash(),
                        params=params))
-        # TODO: make lims work
+        # sorting criterion
         criterion = None
         if parsed_args.sorting.lower() == 'rmsddec':
             criterion = lambda p: -p[1]
@@ -1102,11 +1142,37 @@ everything.
         else:
             print('Invalid sorting type.')
             return
+        # bounds
+        rmsdlowbound  = None
+        rmsdupbound   = None
+        scorelowbound = None
+        scoreupbound  = 0
+        if parsed_args.rmsdlim is not None:
+            try:
+                rmsdlowbound, rmsdupbound = process_limits(parsed_args.rmsdlim)
+            except:
+                print('Incorrectly specified RMSD limits.')
+                return
+        if parsed_args.scorelim is not None:
+            try:
+                scorelowbound, scoreupbound = \
+                    process_limits(parsed_args.scorelim)
+            except:
+                print('Incorrectly specified score limits.')
+                return
         self.text_buffer.seek(0, io.SEEK_END)
         writer = csv.writer(self.text_buffer, delimiter='\t')
+        # I'm so sorry.
         writer.writerows(sorted([datapoint \
                                  for datapoint in data \
-                                 if datapoint[2] < 0], # TODO: make lims work
+                                 if (((rmsdlowbound is None) or \
+                                      rmsdlowbound < datapoint[1]) and \
+                                     ((rmsdupbound is None) or \
+                                      datapoint[1] < rmsdupbound) and \
+                                     ((scorelowbound is None) or \
+                                      scorelowbound < datapoint[2]) and \
+                                     ((scoreupbound is None) or \
+                                      datapoint[2] < scoreupbound))],
                                 key=criterion))
     # Plots
     @continuous
@@ -1170,10 +1236,34 @@ everything.
                             if filename.endswith('.pdb')),
                            PYROSETTA_ENV.get_scorefxn_hash(),
                            params=params)))
-        # TODO: make lims work
+        rmsdlowbound  = None
+        rmsdupbound   = None
+        scorelowbound = None
+        scoreupbound  = 0
+        if parsed_args.rmsdlim is not None:
+            try:
+                rmsdlowbound, rmsdupbound = process_limits(parsed_args.rmsdlim)
+            except:
+                print('Incorrectly specified RMSD limits.')
+                return
+        if parsed_args.scorelim is not None:
+            try:
+                scorelowbound, scoreupbound = \
+                    process_limits(parsed_args.scorelim)
+            except:
+                print('Incorrectly specified score limits.')
+                return
+        # I'm so sorry.
         rmsds,scores = zip(*(datapoint \
                              for datapoint in data \
-                             if datapoint[1] < 0)) # TODO: make lims work
+                             if (((rmsdlowbound is None) or \
+                                  rmsdlowbound < datapoint[0]) and \
+                                 ((rmsdupbound is None) or \
+                                  datapoint[0] < rmsdupbound) and \
+                                 ((scorelowbound is None) or \
+                                  scorelowbound < datapoint[1]) and \
+                                 ((scoreupbound is None) or \
+                                  datapoint[1] < scoreupbound))))
         if self.settings['plotting']:
             plt.plot(rmsds, scores, parsed_args.style)
     @continuous
@@ -1299,5 +1389,5 @@ if __name__ == '__main__':
         OURCMDLINE.cmdqueue.extend(['quit'])
     OURCMDLINE.cmdloop()
     if MPIRANK != 0:
-        sys.stdout = STDOUT
+        sys.stdout = STDOUT # defined at beginning of file
         DEVNULL.close()
