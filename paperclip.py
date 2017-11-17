@@ -15,14 +15,14 @@ interest. Most plotting commands are based on Matlab commands.
 ## Python Standard Library
 import re
 import types, copy
-import functools, operator
+import itertools, functools, operator
 import csv
 import hashlib
 import os, io, time, argparse
 import subprocess
 import json
 import cmd, shlex
-import sys
+import sys, traceback, inspect
 import ast
 import fcntl
 ## Other stuff
@@ -84,7 +84,7 @@ def times_out(f):
         if self_.timelimit:
             try:
                 return timeout_decorator\
-                    .timeout(self_.timelimit)(f)(self_, *args, **kwargs)
+                           .timeout(self_.timelimit)(f)(self_, *args, **kwargs)
             except timeout_decorator.TimeoutError:
                 print('Timed out.')
         else:
@@ -101,6 +101,16 @@ def continuous(f):
                 f(self_, *args, **kwargs)
         else:
             return f(self_, *args, **kwargs)
+    return decorated
+def pure_plotting(f):
+    '''Wraps "pure plotting" cmd commands that shouldn't be executed unless
+    plotting is enabled.'''
+    @functools.wraps(f)
+    def decorated(self_, *args, **kwargs):
+        if self_.settings['plotting']:
+            return f(self_, *args, **kwargs)
+        else:
+            return
     return decorated
 
 ### Useful functions
@@ -135,6 +145,15 @@ def process_limits(limits):
     return [(None if val.lower() in ('same', 'unbound', 'none') \
              else float(val)) \
             for val in limits]
+def process_params(params):
+    '''Process params list so that .params is appended if a path doesn't end
+    with it.'''
+    if params:
+        return [(param if param.endswith('.params') \
+                 else param+'.params') \
+                for param in params]
+    else:
+        return None
 
 # functions to generate different types of accessors for PDBDataBuffer
 def make_PDBDataBuffer_get(data_name):
@@ -220,14 +239,13 @@ def make_PDBDataBuffer_gather(data_name):
                     DEBUG_OUT('retrieving caches for '+dirname)
                     self_.retrieve_data_from_cache(dirname)
                 DEBUG_OUT('all caches retrieved')
-                DEBUG_OUT('abspaths:\n', abspaths)
                 while True:
                     result = MPICOMM.recv(source=MPI.ANY_SOURCE,
                                           tag=MPI.ANY_TAG,
                                           status=MPISTATUS)
                     result_source = MPISTATUS.Get_source()
                     result_tag    = MPISTATUS.Get_tag()
-                    DEBUG_OUT('data received from '+result_source)
+                    DEBUG_OUT('data received from '+str(result_source))
                     # try to find a PDB we don't have the data for yet:
                     while current_file_index < len(abspaths):
                         file_path = abspaths[current_file_index]
@@ -254,7 +272,7 @@ def make_PDBDataBuffer_gather(data_name):
                             break
                     if current_file_index < len(abspaths):
                         DEBUG_OUT('assigning ' + file_info.path+' to ' + \
-                                  result_source)
+                                  str(result_source))
                         MPICOMM.send([file_info_dict,
                                       file_path,
                                       accessor_string],
@@ -262,7 +280,7 @@ def make_PDBDataBuffer_gather(data_name):
                         DEBUG_OUT('assignment sent')
                         current_file_index += 1
                     else:
-                        DEBUG_OUT('all files done. killing '+result_source)
+                        DEBUG_OUT('all files done. killing '+str(result_source))
                         MPICOMM.send(QUIT_GATHERING_SIGNAL,
                                      dest=result_source, tag=WORK_TAG)
                         DEBUG_OUT('worker killed')
@@ -426,6 +444,8 @@ class PDBDataBuffer():
         '''Retrieves data from a cache file of a directory. The data in the
         file is a JSON of a data dict of a PDBDataBuffer, except instead of
         file paths, it has just filenames.'''
+        if MPIRANK != 0:
+            return
         absdirpath = os.path.abspath(dirpath)
         try:
             cache_path = os.path.join(absdirpath, '.paperclip_cache')
@@ -487,7 +507,7 @@ class PDBDataBuffer():
     def update_caches(self, force=False):
         '''Updates the caches for every directory the cache knows about. This
         method is thread-safe.'''
-        if not (self.cachingp or force):
+        if (not (self.cachingp or force)) or MPIRANK != 0:
             return
         dir_paths = {}
         for pdb_path in self.pdb_paths.keys():
@@ -617,7 +637,7 @@ class PDBDataBuffer():
                                                  i, j,
                                                  coarsep=coarsep,
                                                  bound=bound)))
-        return np.array(result)
+        return result
 
 ### Main class
 
@@ -630,7 +650,7 @@ class OurCmdLine(cmd.Cmd):
     cmdfile = None
     settings = {'calculation': True,
                 'caching': True,
-                'plotting': True,
+                'plotting': MPIRANK == 0,
                 'continuous_mode': False}
     timelimit = 0
     last_im = None
@@ -786,7 +806,10 @@ Available settings are:
                       '\'no\'.')
                 return
             if varname in self.settings.keys():
-                self.settings[varname] = value
+                if varname == 'plotting':
+                    self.settings['plotting'] = MPIRANK == 0 and value
+                else:
+                    self.settings[varname] = value
             else:
                 print('That\'s not a valid setting name. Try '
                       '\'get_settings\'.')
@@ -884,6 +907,7 @@ commands run indefinitely.
         '''Clear the plot buffer:  clear_plot'''
         self.last_im = None
         plt.cla()
+        plt.clf()
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
@@ -929,8 +953,10 @@ commands run indefinitely.
 
     ## Matplotlib stuff
     # fundamental stuff
+    @pure_plotting
     def do_save_plot(self, arg):
         '''Save the plot currently in the plot buffer:  save_plot name.eps'''
+        # plotting should already be off, but it doesn't hurt to double-check
         if MPIRANK == 0:
             if arg:
                 try:
@@ -940,6 +966,7 @@ commands run indefinitely.
                           '.svg.')
             else:
                 print('Your plot needs a name.')
+    @pure_plotting
     def do_plot_size(self, arg):
         '''Set the plot size in inches:  plot_size 10 10'''
         try:
@@ -947,15 +974,19 @@ commands run indefinitely.
         except:
             print('Provide two numbers separated by spaces.')
     # titles and labels
+    @pure_plotting
     def do_plot_title(self, arg):
         '''Set the title of the current plot:  plot_title My title'''
         plt.title(arg)
+    @pure_plotting
     def do_plot_xlabel(self, arg):
         '''Set the x axis label of the current plot:  plot_xlabel My xlabel'''
         plt.xlabel(arg)
+    @pure_plotting
     def do_plot_ylabel(self, arg):
         '''Set the y axis label of the current plot:  plot_ylabel My ylabel'''
         plt.ylabel(arg)
+    @pure_plotting
     def do_xticks(self, arg):
         '''Set the xticks on your plot, optionally specifying location.
     xticks 'label 1' 'label 2' 'label 3' |
@@ -978,6 +1009,7 @@ commands run indefinitely.
             except:
                 print('Malformed input. See examples in help.')
         plt.xticks(tick_indices, tick_labels)
+    @pure_plotting
     def do_yticks(self, arg):
         '''Set the xticks on your plot, optionally specifying location.
     yticks 'label 1' 'label 2' 'label 3' |
@@ -1000,6 +1032,28 @@ commands run indefinitely.
             except:
                 print('Malformed input. See examples in help.')
         plt.yticks(tick_indices, tick_labels)
+    @pure_plotting
+    def do_set_xticks_rotation(self, arg):
+        '''Set the rotation of the xtick labels in your plot.
+    set_xticks_rotation 90'''
+        try:
+            if arg not in ('horizontal', 'vertical'):
+                arg = float(arg)
+        except:
+            print('Invalid rotation value. It should be "horizontal", '
+                  '"vertical", or a number.')
+        plt.setp(plt.xticks()[1], rotation=arg)
+    def do_set_yticks_rotation(self, arg):
+        '''Set the rotation of the ytick labels in your plot.
+    set_yticks_rotation 90'''
+        try:
+            if arg not in ('horizontal', 'vertical'):
+                arg = float(arg)
+        except:
+            print('Invalid rotation value. It should be "horizontal", '
+                  '"vertical", or a number.')
+        plt.setp(plt.yticks()[1], rotation=arg)
+    @pure_plotting
     def do_prune_xticks(self, arg):
         '''Remove every other xtick:  prune_xticks'''
         ax = plt.gca()
@@ -1010,30 +1064,34 @@ commands run indefinitely.
     xlim 0 1  |  xlim SAME 1'''
         try:
             left, right = arg.split()
-            left  = None if left  == 'SAME' else float(left)
-            right = None if right == 'SAME' else float(right)
+            left  = None if left.lower()  == 'same' else float(left)
+            right = None if right.lower() == 'same' else float(right)
             plt.gca().set_xlim(left=left, right=right)
         except ValueError:
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
+    @pure_plotting
     def do_ylim(self, arg):
         '''Set limits for the y axis.
     ylim 0 1  |  ylim SAME 1'''
         try:
             left, right = arg.split()
-            left  = None if left  == 'SAME' else float(left)
-            right = None if right == 'SAME' else float(right)
+            left  = None if left.lower()  == 'same' else float(left)
+            right = None if right.lower() == 'same' else float(right)
             plt.gca().set_ylim(left=left, right=right)
         except ValueError:
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
+    @pure_plotting
     def do_invert_xaxis(self, arg):
         '''Invert the current axes' x axis:  invert_xaxis'''
         plt.gca().invert_xaxis()
+    @pure_plotting
     def do_invert_yaxis(self, arg):
         '''Invert the current axes' y axis:  invert_yaxis'''
         plt.gca().invert_yaxis()
     # subplot stuff
+    @pure_plotting
     def do_subplot(self, arg):
         '''Create a subplot with Matlab syntax:  subplot 2 1 1'''
         try:
@@ -1044,11 +1102,46 @@ commands run indefinitely.
                 plt.subplot(int(args[0]))
         except RuntimeError:
             print('That\'s not a valid subplot spec.')
+    @pure_plotting
+    def do_subplot2grid(self, arg):
+        parser = argparse.ArgumentParser(
+            description='Create a subplot grid, first specifying the grid '
+                        'size, and then the subplot location on the grid. '
+                        'Optionally include a colspan or rowspan.')
+        parser.add_argument('specs',
+                            nargs=4,
+                            type=int,
+                            help='Four integers: the grid height and width, '
+                                 'then the coordinates of the location you\'re'
+                                 ' selecting (indexed from 0).')
+        parser.add_argument('--colspan',
+                            dest='colspan',
+                            action='store',
+                            type=int,
+                            default=1,
+                            help='Amount of columns your selection spans for.')
+        parser.add_argument('--rowspan',
+                            dest='rowspan',
+                            action='store',
+                            type=int,
+                            default=1,
+                            help='Amount of rows your selection spans for.')
+        self.do_subplot2grid.__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+        plt.subplot2grid(tuple(parsed_args.specs[0:2]),
+                         tuple(parsed_args.specs[2:4]),
+                         colspan=parsed_args.colspan,
+                         rowspan=parsed_args.rowspan)
+    @pure_plotting
     def do_tight_layout(self, arg):
         '''Adjust subplot spacing so that there's no overlaps between
 different subplots.
     tight_layout'''
         plt.tight_layout()
+    @pure_plotting
     def do_add_colorbar(self, arg):
         '''Add a colorbar to your figure next to a group of subplots, for the
 most recently plotted subplot. Don't call tight_layout after this; that breaks
@@ -1109,14 +1202,7 @@ everything.
         filenames_in_in_dir = [filename \
                                for filename in filenames_in_in_dir \
                                if filename.endswith('.pdb')]
-        params = None
-        if parsed_args.params:
-            params = []
-            for param in parsed_args.params:
-                if param.endswith('.params'):
-                    params.append(param)
-                else:
-                    params.append(param+'.params')
+        params = process_params(parsed_args.params)
         data = zip(filenames_in_in_dir,
                    self.data_buffer.gather_rmsd(
                        (os.path.join(parsed_args.in_dir, filename) \
@@ -1180,7 +1266,7 @@ everything.
         global PYROSETTA_ENV
         parser = argparse.ArgumentParser(
             description='For each PDB in a directory, plot the RMSDs vs a '
-            'particular file against their energy score.')
+                        'particular file against their energy score.')
         parser.add_argument('in_dir',
                             action='store',
                             help='The directory to plot for.')
@@ -1215,14 +1301,7 @@ everything.
         except SystemExit:
             return
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
-        params = None
-        if parsed_args.params:
-            params = []
-            for param in parsed_args.params:
-                if param.endswith('.params'):
-                    params.append(param)
-                else:
-                    params.append(param+'.params')
+        params = process_params(parsed_args.params)
         data = set(zip(self.data_buffer.gather_rmsd(
                            (os.path.join(parsed_args.in_dir, filename) \
                             for filename in filenames_in_in_dir \
@@ -1291,20 +1370,15 @@ everything.
             parsed_args = parser.parse_args(arg.split())
         except SystemExit:
             return
-        params = None
-        if parsed_args.params:
-            params = []
-            for param in parsed_args.params:
-                if param.endswith('.params'):
-                    params.append(param)
-                else:
-                    params.append(param+'.params')
+        params = process_params(parsed_args.params)
         filenames_in_in_dir = os.listdir(parsed_args.in_dir)
-        results = self.data_buffer.gather_neighbors(
-                      (os.path.join(parsed_args.in_dir, filename) \
-                       for filename in filenames_in_in_dir \
-                       if filename.endswith('.pdb')),
-                      params=params)
+        results = [np.array(result)
+                   for result in \
+                       self.data_buffer.gather_neighbors(
+                           (os.path.join(parsed_args.in_dir, filename) \
+                            for filename in filenames_in_in_dir \
+                            if filename.endswith('.pdb')),
+                           params=params)]
         if self.settings['plotting']:
             avg_matrix = np.mean(np.stack(results), axis=0)
             self.last_im = \
@@ -1315,28 +1389,39 @@ everything.
             plt.tick_params(axis='both', which='both',
                             top='off', bottom='off', left='off', right='off')
             self.do_prune_xticks('')
+    @continuous
     def do_plot_neighbors_bar(self, arg):
-        '''Create a bar chart of a set of dirs for the average long-distance
-neighbor rate among the PDBs in those dirs. Set the labels with xticks.
-    plot_neighbors_bar dir1 dir2 dir3 |
-    plot_neighbors_bar dir1 dir2 dir3 --params ABC'''
-        parsed = shlex.split(arg)
-        params = None
+        parser = argparse.ArgumentParser(
+            description='Create a bar chart of a set of dirs for the average '
+                        'long-distance neighbor rate among the PDBs in those '
+                        'dirs. Set the labels using xticks.')
+        parser.add_argument('dirs',
+                            nargs='*',
+                            help='Directories to chart.')
+        parser.add_argument('--params',
+                            nargs='*',
+                            help='Path to params files; it is assumed that '
+                                 'all PDBs need the same params. (If they '
+                                 'don\'t, you can just list the params '
+                                 'required by all of the PDBs together; '
+                                 'Rosetta doesn\'t care.)')
+        self.do_plot_neighbors_bar.__func__.__doc__ = parser.format_help()
         try:
-            params_index = parsed.index('--params')
-            params = parsed[params_index+1:]
-            parsed = parsed[:params_index]
-        except ValueError:
-            pass
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        params = process_params(parsed_args.params)
         values = []
         try:
-            for pdbdir in parsed:
+            for pdbdir in parsed_args.dirs:
                 filenames = os.listdir(pdbdir)
-                results = self.data_buffer.gather_neighbors(
-                              (os.path.join(pdbdir, filename) \
-                               for filename in filenames \
-                               if filename.endswith('.pdb')),
-                              params=params)
+                results = [np.array(result) \
+                           for result in \
+                               self.data_buffer.gather_neighbors(
+                                   (os.path.join(pdbdir, filename) \
+                                    for filename in filenames \
+                                    if filename.endswith('.pdb')),
+                                   params=params)]
                 avg_matrix = np.mean(np.stack(results), axis=0)
                 # get a horizontally stacked version of matrix with middle
                 # five diagonals removed
@@ -1348,9 +1433,163 @@ neighbor rate among the PDBs in those dirs. Set the labels with xticks.
                                for i in range(avg_matrix.shape[0]))])
                 values.append(np.mean(stacked))
         except:
-            print('That\'s not a valid set of dirs.')
+            print('Something weird went wrong; that\'s probably not a valid '
+                  'set of dirs.')
+            traceback.print_exc()
         if self.settings['plotting']:
             plt.barh(np.arange(len(values)), values, align='center')
+    @continuous
+    def do_plot_neighbors_comparison_bar(self, arg):
+        parser = argparse.ArgumentParser(
+            description='Plot a grouped bar chart where each group corresponds'
+                        ' to a group of compared directories for different '
+                        'PDBs, with each bar corresponding to a different PDB.'
+                        ' The comparison itself is fraction nonnative '
+                        'long-distance neighbors, with nativeness determined '
+                        'by the presence of the contacts in a particular PDB '
+                        'you specify (for each PDB in a directory group). Set '
+                        'the labels using xticks.')
+        parser.add_argument('dirs',
+                            nargs='*',
+                            help='Directories to chart. Give the directories '
+                                 'in the same order their bars will appear in '
+                                 'on the chart. So if you were comparing dirs '
+                                 'for PDB1 and PDB2, you\'d list the dirs in '
+                                 'the order "PDB1-dir1 PDB2-dir1 PDB1-dir2 '
+                                 'PDB2-dir2."')
+        parser.add_argument('--pdbs',
+                            dest='pdbs',
+                            action='store',
+                            nargs='*',
+                            help='Idealized PDBs to compare dirs against.')
+        parser.add_argument('--params',
+                            dest='params',
+                            action='store',
+                            nargs='*',
+                            help='Path to params files; it is assumed that '
+                                 'all PDBs need the same params. (If they '
+                                 'don\'t, you can just list the params '
+                                 'required by all of the PDBs together; '
+                                 'Rosetta doesn\'t care.)')
+        parser.add_argument('--scorelim',
+                            nargs='*',
+                            help='Limits on score for the plot. If a side\'s '
+                                 'limit is given as NONE, that side is '
+                                 'unlimited.')
+        parser.add_argument('--colors',
+                            dest='colors',
+                            default=None,
+                            help='List of Matlab-type colors to use for bars, '
+                                 'as a smooshed-together list of letters. '
+                                 'Example:  rgbcmyk')
+        parser.add_argument('--missing-only',
+                            dest='missingp',
+                            action='store_true',
+                            help='Catalog fraction of nonnative contacts only '
+                                 'for contacts present in prototypes.')
+        parser.add_argument('--nonnative',
+                            dest='nonnativep',
+                            action='store_true',
+                            help='Catalog fraction nonnative contacts instead '
+                                 'of native contacts.')
+        parser.add_argument('--show-errors',
+                            dest='errorsp',
+                            action='store_true',
+                            help='Add error bars (1 sigma).')
+        self.do_plot_neighbors_comparison_bar \
+            .__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        params = process_params(parsed_args.params)
+        npdbs = len(parsed_args.pdbs)
+        if len(parsed_args.dirs) % npdbs != 0:
+            print('Incorrect dirs spec; number of dirs must be multiple of '
+                  'number of pdbs. Try "help plot_neighbors_comparison_bar".')
+            return
+        pdbmatrices = [np.array(result) \
+                       for result in \
+                           self.data_buffer.gather_neighbors(parsed_args.pdbs,
+                                                             params=params)]
+        # parse bounds
+        scorelowbound = None
+        scoreupbound  = 0
+        if parsed_args.scorelim is not None:
+            try:
+                scorelowbound, scoreupbound = \
+                    process_limits(parsed_args.scorelim)
+            except:
+                print('Incorrectly specified score limits.')
+                return
+        # auxiliary function for the calculations
+        def remove_diagonals(m, n_removed):
+            '''Remove diagonals from the center of and flatten a matrix.'''
+            return np.hstack(
+                [np.hstack(m[i][i+n_removed//2+1:] \
+                           for i in range(m.shape[0])),
+                 np.hstack(m[i][:max(i-n_removed//2,0)] \
+                           for i in range(m.shape[0]))])
+        # do the calculations
+        values = []
+        if parsed_args.errorsp:
+            errors = []
+        else:
+            errors = None
+        try:
+            for index, pdbdir in enumerate(parsed_args.dirs):
+                prototype = pdbmatrices[index % npdbs]
+                filenames = os.listdir(pdbdir)
+                scores = self.data_buffer.gather_score(
+                             (os.path.join(pdbdir, filename) \
+                              for filename in filenames \
+                              if filename.endswith('.pdb')),
+                             PYROSETTA_ENV.get_scorefxn_hash(),
+                             params=params)
+                results = [(np.array(result) - prototype)**2 \
+                           for result in \
+                               self.data_buffer.gather_neighbors(
+                                   (os.path.join(pdbdir, filename) \
+                                    for filename in filenames \
+                                    if filename.endswith('.pdb')),
+                                   params=params)]
+                results = [m for i,m in enumerate(results) \
+                           if (((scorelowbound is None) or \
+                                scorelowbound < scores[i]) and \
+                               ((scoreupbound is None) or \
+                                scores[i] < scoreupbound))]
+                # get horizontally stacked versions of matrices with middle
+                # five diagonals removed
+                N_REMOVED_DIAG = 5 # number of removed diagonals; must be odd
+                linresults = [remove_diagonals(m, 5) for m in results]
+                fracs = None
+                if parsed_args.missingp:
+                    linprototype = remove_diagonals(prototype, 5)
+                    fracs = [np.sum(m*linprototype)/np.sum(linprototype) \
+                             for m in linresults]
+                else:
+                    fracs = [np.sum(m)/m.size for m in linresults]
+                if not parsed_args.nonnativep:
+                    fracs = [1-m for m in fracs]
+                values.append(np.mean(fracs))
+                if parsed_args.errorsp:
+                    errors.append(np.std(fracs))
+        except:
+            print('Something weird went wrong.')
+            traceback.print_exc()
+        if self.settings['plotting']:
+            nbins = len(parsed_args.dirs) // len(parsed_args.pdbs)
+            width = 0.5/nbins
+            indices = np.array(
+                          tuple(
+                              itertools.chain.from_iterable(
+                                  ((i+(j-npdbs/2)*width \
+                                    for j in range(npdbs)) \
+                                   for i in range(nbins)))))
+            plt.bar(indices, values, yerr=errors,
+                    color=parsed_args.colors, ecolor='k',
+                    width=width)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
