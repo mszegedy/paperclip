@@ -210,10 +210,14 @@ def make_PDBDataBuffer_get(data_name):
             argtypesindices.append(kwarg)
         calcargs_proto   = []
         calckwargs_proto = {}
-        for index in argtypesindices:
-            if isinstance(index, int):
-                if 
-            elif isinstance(index, str):
+        for i, arg in enumerate(args):
+            if argtypes[i] in ('stream', 'path'):
+                calcargs.append(self_.encapsulate_file(arg))
+            else:
+                calcargs.append(arg)
+        for kwarg, value in kwargs.items():
+            try:
+                ### TODO
         self_.retrieve_data_from_cache(os.path.dirname(file_path))
         file_info = self_.get_pdb_file_info(file_path)
         file_data = self_.data.setdefault(file_info.hash, {}) \
