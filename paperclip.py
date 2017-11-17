@@ -77,6 +77,12 @@ def needs_pr_scorefxn(f):
             PYROSETTA_ENV.set_scorefxn()
         return f(*args, **kwargs)
     return decorated
+def uses_scorefxn(f):
+    '''Sets an attribute on the function that tells PDBDataBuffer to include a
+    hash of the scorefxn as a storage key for the output of this function.
+    Useless for functions that aren't calculate_ methods in PDBDataBuffer.'''
+    f.uses_scorefxn_p = True
+    return f
 def times_out(f):
     '''Makes a function time out after it hits self.timelimit.'''
     @functools.wraps(f)
@@ -114,6 +120,7 @@ def pure_plotting(f):
     return decorated
 
 ### Useful functions
+# vanilla stuff
 def DEBUG_OUT(*args, **kwargs):
     if DEBUG:
         print('DEBUG: ', end='')
@@ -154,20 +161,33 @@ def process_params(params):
                 for param in params]
     else:
         return None
-
+# Rosetta stuff
+@needs_pr_init
+def pose_from_contents(contents, params=None):
+    '''Returns a Pose of a given pdb file contents string.'''
+    pose = None
+    if params:
+        pose = mpre.pose_from_pdbstring_with_params(contents, params)
+    else:
+        pose = pr.Pose()
+        pr.rosetta.core.import_pose.pose_from_pdbstring(pose, contents)
+    return pose
+@needs_pr_init
+def pose_from_stream(stream, params=None):
+    '''Returns a Pose of a given stream pointing at the contents of a
+    PDB.'''
+    # not gonna bother rewinding stream
+    return pose_from_contents(stream.read(), params)
 # functions to generate different types of accessors for PDBDataBuffer
 def make_PDBDataBuffer_get(data_name):
     '''Create a get_ accessor function for a PDBDataBuffer data type.'''
     # Python duck typing philosophy says we shouldn't do any explicit
     # checking of the thing stored at the attribute, but in any case,
-    # it should be a function that takes a pdb_contents string as its
-    # first argument, a params list as a keyword argument, and a bunch
-    # of hashable arguments as the rest of its arguments.
-    # TODO: Fix this so that you don't need to pass the scorefxn hash
-    #       to get_score().
-    # TODO: Fix this so that calculate_rmsd() can take a contents
-    #       hash, rather than a path.
-    def get(self_, file_path, *args, params=None, **kwargs):
+    # it should be a function that takes at least one PDB file path as
+    # a positional argument, a params list as a keyword argument, and a
+    # bunch of hashable arguments as the rest of its arguments.
+    def get(self_, *args, params=None, **kwargs):
+        # CODE FOR HANDLING AND REPLACING ARGS GOES HERE
         self_.retrieve_data_from_cache(os.path.dirname(file_path))
         file_info = self_.get_pdb_file_info(file_path)
         file_data = self_.data.setdefault(file_info.hash, {}) \
@@ -311,7 +331,7 @@ def make_PDBDataBuffer_gather(data_name):
                                  dest=0, tag=DONE_TAG)
             # Synchronize everything that could have possibly changed:
             self_.data = MPICOMM.bcast(self_.data, root=0)
-            self_.pdb_paths = MPICOMM.bcast(self_.pdb_paths, root=0)
+            self_.file_paths = MPICOMM.bcast(self_.pdb_paths, root=0)
             self_.cache_paths = MPICOMM.bcast(self_.cache_paths, root=0)
             file_indices_dict = MPICOMM.bcast(file_indices_dict, root=0)
             # All threads should be on the same page at this point.
@@ -416,9 +436,9 @@ class PDBDataBuffer():
     self.data:
     { content_key : { data_function_name :
                         { data_function_params_tuple : data } } }
-    self.pdb_paths:
-    { pdb_file_path : { 'mtime' : mtime_at_last_hashing,
-                        'hash'  : contents_hash } }
+    self.file_paths:
+    { file_path : { 'mtime' : mtime_at_last_hashing,
+                    'hash'  : contents_hash } }
     self.cache_paths:
     { cache_file_dir_path : mtime_at_last_access }
     '''
@@ -427,7 +447,7 @@ class PDBDataBuffer():
         self.calculatingp = True
         self.cachingp = MPIRANK == 0
         self.data = {}
-        self.pdb_paths = {}
+        self.file_paths = {}
         self.cache_paths = {}
         self.changed_dirs = set()
         # Monkey patch in the data accessors:
@@ -490,17 +510,17 @@ class PDBDataBuffer():
                                 self.data[content_key] \
                                          [data_name] \
                                          [str(data_key)] = data
-                    for pdb_name, pdb_info_pair in disk_pdb_info.items():
-                        DEBUG_OUT('saving info for '+pdb_name)
-                        pdb_path = os.path.join(absdirpath, pdb_name)
-                        ourpdb_info_pair = self.pdb_paths.get(pdb_path, None)
-                        ourpdbmtime = None
-                        if ourpdb_info_pair is not None:
-                            ourpdbmtime = ourpdb_info_pair['mtime']
+                    for name, info_pair in disk_pdb_info.items():
+                        DEBUG_OUT('saving info for '+name)
+                        path = os.path.join(absdirpath, name)
+                        our_info_pair = self.file_paths.get(pdb_path, None)
+                        ourfilemtime = None
+                        if our_info_pair is not None:
+                            ourfilemtime = our_info_pair['mtime']
                         else:
-                            ourpdbmtime = 0
-                        if pdb_info_pair['mtime'] > ourpdbmtime:
-                            self.pdb_paths[pdb_path] = pdb_info_pair
+                            ourfilemtime = 0
+                        if info_pair['mtime'] > ourfilemtime:
+                            self.file_paths[path] = info_pair
             self.cache_paths[absdirpath] = diskmtime
         except FileNotFoundError:
             pass
@@ -510,12 +530,12 @@ class PDBDataBuffer():
         if (not (self.cachingp or force)) or MPIRANK != 0:
             return
         dir_paths = {}
-        for pdb_path in self.pdb_paths.keys():
-            dir_path, pdb_name = os.path.split(pdb_path)
+        for path in self.file_paths.keys():
+            dir_path, name = os.path.split(path)
             if dir_path in self.changed_dirs:
                 dir_paths.setdefault(dir_path, set())
-                dir_paths[dir_path].add(pdb_name)
-        for dir_path, pdb_names in dir_paths.items():
+                dir_paths[dir_path].add(name)
+        for dir_path, names in dir_paths.items():
             cache_path = os.path.join(dir_path, '.paperclip_cache')
             cache_file = None
             try:
@@ -530,36 +550,37 @@ class PDBDataBuffer():
                     time.sleep(0.05)
             self.retrieve_data_from_cache(dir_path, cache_fd=cache_file)
             dir_data = {}
-            dir_pdb_paths = {}
-            for pdb_name in pdb_names:
-                pdb_path = os.path.join(dir_path, pdb_name)
-                dir_pdb_paths[pdb_name] = self.pdb_paths[pdb_path]
-                ourhash = dir_pdb_paths[pdb_name]['hash']
-                try:
-                    dir_data[ourhash] = self.data[ourhash]
-                except KeyError:
-                    pass
-                #DEBUG_OUT('  updated cache with data for PDB at ', pdb_path)
-            cache_file.write(json.dumps([dir_data, dir_pdb_paths]))
+            dir_file_paths = {}
+            for name in names:
+                path = os.path.join(dir_path, name)
+                dir_file_paths[name] = self.file_paths[path]
+                ourhash = dir_file_paths[name]['hash']
+                if name.endswith('.pdb'):
+                    try:
+                        dir_data[ourhash] = self.data[ourhash]
+                    except KeyError:
+                        pass
+                #DEBUG_OUT('  updated cache with data for file at ', pdb_path)
+            cache_file.write(json.dumps([dir_data, dir_file_paths]))
             fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
             DEBUG_OUT('wrote cache file at ', cache_path)
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
             self.changed_dirs = set()
-    def get_pdb_file_info(self, path):
+    def encapsulate_file(self, path):
         '''Returns an object that in theory contains the absolute path, mtime, contents
-        hash, and maybe contents of a PDB. The first three are accessed
+        hash, and maybe contents of a file. The first three are accessed
         directly, while the last is accessed via an accessor method, so that it
         can be retrieved if necessary. Creating and updating the object both
-        update the external PDBDataBuffer's info on that pdb.
-        '''
-        class PDBFileInfo():
+        update the external PDBDataBuffer's info on that pdb.'''
+        class FileInfo():
             def __init__(self_, path_):
                 self_.path = os.path.abspath(path_)
-                self_.pdb_paths_dict = self.pdb_paths.setdefault(self_.path, {})
-                self_.mtime = self_.pdb_paths_dict.setdefault('mtime', 0)
-                self_.hash = self_.pdb_paths_dict.setdefault('hash', None)
-                self_.contents = None
+                self_.file_paths_dict = \
+                    self.file_paths.setdefault(self_.path, {})
+                self_.mtime = self_.file_paths_dict.setdefault('mtime', 0)
+                self_.hash = self_.file_paths_dict.setdefault('hash', None)
+                self_.stream = None
                 diskmtime = os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.hash is None:
                     self_.update(diskmtime)
@@ -567,29 +588,20 @@ class PDBDataBuffer():
                 diskmtime = mtime or os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.contents is None:
                     with open(self_.path, 'r') as pdb_file:
-                        self_.contents = pdb_file.read()
+                        contents = pdb_file.read()
+                    self_.mtime = diskmtime
                     hash_fun = hashlib.md5()
                     hash_fun.update(self_.contents.encode())
                     self_.hash = hash_fun.hexdigest()
-                    self_.mtime = diskmtime
-                    self_.pdb_paths_dict['hash'] = self_.hash
-                    self_.pdb_paths_dict['mtime'] = self_.mtime
-            def get_contents(self_, mtime = None):
+                    self_.stream = io.StringIO(contents)
+                    self_.file_paths_dict['mtime'] = self_.mtime
+                    self_.file_paths_dict['hash'] = self_.hash
+            def get_stream(self_, mtime = None):
                 self_.update(mtime)
-                return self_.contents
-        return PDBFileInfo(path)
+                return self_.stream
+        return FileInfo(path)
 
     ## Auxiliary stuff
-    @needs_pr_init
-    def get_pdb_contents_pose(self, contents, params=None):
-        '''Returns a Pose of a given pdb file contents string.'''
-        pose = None
-        if params:
-            pose = mpre.pose_from_pdbstring_with_params(contents, params)
-        else:
-            pose = pr.Pose()
-            pr.rosetta.core.import_pose.pose_from_pdbstring(pose, contents)
-        return pose
 
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
@@ -599,30 +611,28 @@ class PDBDataBuffer():
     # a list instead of a single filename, but is actually concurrently
     # controlled if there are multiple processors available.
     @needs_pr_init
-    def calculate_score(self, contents, scorefxn_hash, params=None):
-        '''Calculates the score of a protein based on the provided contents of
-        its PDB file. scorefxn_hash is not used inside the calculation, but is
-        used for indexing into the buffer.
+    def calculate_score(self, stream, scorefxn_hash, params=None):
+        '''Calculates the score of a protein from a stream of its PDB file.
+        scorefxn_hash is not used inside the calculation, but is used for
+        indexing into the buffer.
         '''
         global PYROSETTA_ENV
-        pose = self.get_pdb_contents_pose(contents, params)
+        pose = pose_from_stream(stream, params)
         return PYROSETTA_ENV.scorefxn(pose)
     @needs_pr_init
-    def calculate_rmsd(self, lhs_contents, rhs_path, rmsd_type,
+    def calculate_rmsd(self, lhs_stream, rhs_stream, rmsd_type,
                                       params=None):
         '''Calculates the RMSD of two proteins from each other and stores
         it, without assuming commutativity.'''
-        pose_lhs = self.get_pdb_contents_pose(lhs_contents, params=params)
-        pose_rhs = self.get_pdb_contents_pose(self.get_pdb_file_info(rhs_path) \
-                                                  .get_contents(),
-                                              params=params)
+        pose_lhs = pose_from_stream(lhs_stream, params=params)
+        pose_rhs = pose_from_stream(rhs_stream, params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
     @needs_pr_init
-    def calculate_neighbors(self, contents, coarsep=False, bound=None,
+    def calculate_neighbors(self, stream, coarsep=False, bound=None,
                             params=None):
         '''Calculates the residue neighborhood matrix of a protein based on the
         provided contents of its PDB file.'''
-        pose = self.get_pdb_contents_pose(contents, params=params)
+        pose = pose_from_stream(stream, params=params)
         result = []
         n_residues = pose.size()
         for i in range(1,n_residues+1):
