@@ -77,11 +77,11 @@ def needs_pr_scorefxn(f):
             PYROSETTA_ENV.set_scorefxn()
         return f(*args, **kwargs)
     return decorated
-def uses_scorefxn(f):
+def uses_pr_env(f):
     '''Sets an attribute on the function that tells PDBDataBuffer to include a
-    hash of the scorefxn as a storage key for the output of this function.
+    hash of the PyRosetta env as a storage key for the output of this function.
     Useless for functions that aren't calculate_ methods in PDBDataBuffer.'''
-    f.uses_scorefxn_p = True
+    f.uses_pr_env_p = True
     return f
 def times_out(f):
     '''Makes a function time out after it hits self.timelimit.'''
@@ -187,7 +187,33 @@ def make_PDBDataBuffer_get(data_name):
     # a positional argument, a params list as a keyword argument, and a
     # bunch of hashable arguments as the rest of its arguments.
     def get(self_, *args, params=None, **kwargs):
-        # CODE FOR HANDLING AND REPLACING ARGS GOES HERE
+        argspec = inspect.getfullargspec(
+                      getattr(self_, 'calculate_'+data_name))
+        first_defaulted_index = #TODO
+        argtypes = {}
+        argtypesindices = []
+        for i, arg in enumerate(argspec.args):
+            if arg.endswith('stream'):
+                argtypes[i] = 'stream'
+            elif arg.endswith('path'):
+                argtypes[i] = 'path'
+            else:
+                argtypes[i] = 'other'
+            argtypesindices.append(i)
+        for kwarg in argspec.kwonlyargs:
+            if kwarg.endswith('stream'):
+                argtypes[kwarg] = 'stream'
+            elif kwarg.endswith('path'):
+                argtypes[kwarg] = 'path'
+            else:
+                argtypes[kwarg] = 'other'
+            argtypesindices.append(kwarg)
+        calcargs_proto   = []
+        calckwargs_proto = {}
+        for index in argtypesindices:
+            if isinstance(index, int):
+                if 
+            elif isinstance(index, str):
         self_.retrieve_data_from_cache(os.path.dirname(file_path))
         file_info = self_.get_pdb_file_info(file_path)
         file_data = self_.data.setdefault(file_info.hash, {}) \
@@ -199,11 +225,11 @@ def make_PDBDataBuffer_get(data_name):
         try:
             return file_data[accessor_string]
         except KeyError:
+            # construct new args
             if self_.calculatingp:
                 file_data[accessor_string] = \
                     getattr(self_, 'calculate_'+data_name) \
-                        (file_info.get_contents(), *args,
-                         params=params, **kwargs)
+                        (*calcargs, params=params, **calckwargs)
                 self_.changed_dirs.add(os.path.dirname(file_path))
                 self_.update_caches()
                 return file_data[accessor_string]
@@ -364,8 +390,8 @@ class PyRosettaEnv():
         if patch:
             self.scorefxn.apply_patch_from_file(patch)
     @needs_pr_scorefxn
-    def get_scorefxn_hash(self):
-        '''Gets a hash of the properties of the current scorefxn.'''
+    def get_hash(self):
+        '''Gets a hash of the properties of the current env.'''
         hash_fun = hashlib.md5()
         weights = self.scorefxn.weights()
         hash_fun.update(weights.weighted_string_of(weights).encode())
@@ -606,12 +632,13 @@ class PDBDataBuffer():
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
     # is just the same thing but with all the buffer/caching magic attached, 
-    # and with the contents arg replaced with a path arg. It also creates a
+    # and with stream args replaced with path args. It also creates a
     # gather_<whatever>, which outwardly looks like get_<whatever> operating on
     # a list instead of a single filename, but is actually concurrently
     # controlled if there are multiple processors available.
+    @uses_pr_env
     @needs_pr_init
-    def calculate_score(self, stream, scorefxn_hash, params=None):
+    def calculate_score(self, stream, params=None):
         '''Calculates the score of a protein from a stream of its PDB file.
         scorefxn_hash is not used inside the calculation, but is used for
         indexing into the buffer.
@@ -1053,6 +1080,7 @@ commands run indefinitely.
             print('Invalid rotation value. It should be "horizontal", '
                   '"vertical", or a number.')
         plt.setp(plt.xticks()[1], rotation=arg)
+    @pure_plotting
     def do_set_yticks_rotation(self, arg):
         '''Set the rotation of the ytick labels in your plot.
     set_yticks_rotation 90'''
@@ -1223,7 +1251,6 @@ everything.
                    self.data_buffer.gather_score(
                        (os.path.join(parsed_args.in_dir, filename) \
                         for filename in filenames_in_in_dir),
-                       PYROSETTA_ENV.get_scorefxn_hash(),
                        params=params))
         # sorting criterion
         criterion = None
@@ -1323,7 +1350,6 @@ everything.
                            (os.path.join(parsed_args.in_dir, filename) \
                             for filename in filenames_in_in_dir \
                             if filename.endswith('.pdb')),
-                           PYROSETTA_ENV.get_scorefxn_hash(),
                            params=params)))
         rmsdlowbound  = None
         rmsdupbound   = None
@@ -1554,7 +1580,6 @@ everything.
                              (os.path.join(pdbdir, filename) \
                               for filename in filenames \
                               if filename.endswith('.pdb')),
-                             PYROSETTA_ENV.get_scorefxn_hash(),
                              params=params)
                 results = [(np.array(result) - prototype)**2 \
                            for result in \
