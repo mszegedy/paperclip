@@ -10,6 +10,7 @@ Depends on:
   mszpyrosettaextension   (Python library)
   intel_mkl                (Amarel module)
   mpi4py                  (Python library)
+  dill                    (Python library)
   matplotlib              (Python library)
   timeout_decorator       (Python library)
   

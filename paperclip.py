@@ -28,6 +28,7 @@ import fcntl
 ## Other stuff
 import timeout_decorator
 from mpi4py import MPI
+import dill
 import numpy as np
 import matplotlib
 matplotlib.use('Agg') # otherwise lack of display breaks program
@@ -43,6 +44,8 @@ MPICOMM   = MPI.COMM_WORLD
 MPIRANK   = MPICOMM.Get_rank()
 MPISIZE   = MPICOMM.Get_size()
 MPISTATUS = MPI.Status()
+MPI.pickle.dumps = dill.dumps # upgrade
+MPI.pickle.loads = dill.loads # upgrade
 PYROSETTA_ENV = None
 ROSETTA_RMSD_TYPES = ['gdtsc',
                       'CA_rmsd',
@@ -187,56 +190,25 @@ def make_PDBDataBuffer_get(data_name):
     # a positional argument, a params list as a keyword argument, and a
     # bunch of hashable arguments as the rest of its arguments.
     def get(self_, *args, params=None, **kwargs):
-        argspec = inspect.getfullargspec(
-                      getattr(self_, 'calculate_'+data_name))
-        first_defaulted_index = #TODO
-        argtypes = {}
-        argtypesindices = []
-        for i, arg in enumerate(argspec.args):
-            if arg.endswith('stream'):
-                argtypes[i] = 'stream'
-            elif arg.endswith('path'):
-                argtypes[i] = 'path'
-            else:
-                argtypes[i] = 'other'
-            argtypesindices.append(i)
-        for kwarg in argspec.kwonlyargs:
-            if kwarg.endswith('stream'):
-                argtypes[kwarg] = 'stream'
-            elif kwarg.endswith('path'):
-                argtypes[kwarg] = 'path'
-            else:
-                argtypes[kwarg] = 'other'
-            argtypesindices.append(kwarg)
-        calcargs_proto   = []
-        calckwargs_proto = {}
-        for i, arg in enumerate(args):
-            if argtypes[i] in ('stream', 'path'):
-                calcargs.append(self_.encapsulate_file(arg))
-            else:
-                calcargs.append(arg)
-        for kwarg, value in kwargs.items():
-            try:
-                ### TODO
-        self_.retrieve_data_from_cache(os.path.dirname(file_path))
-        file_info = self_.get_pdb_file_info(file_path)
-        file_data = self_.data.setdefault(file_info.hash, {}) \
+        proto_args = self_.proto_args(data_name, args, kwargs)
+        for path in proto_args.paths:
+            self_.retrieve_data_from_cache(os.path.dirname(path))
+        file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
                               .setdefault(data_name, {})
-        kwargs_args_list = list(kwargs.keys())
-        kwargs_args_list.sort()
-        accessor_string = str(tuple(args) + \
-                              tuple(kwargs[arg] for arg in kwargs_args_list))
         try:
-            return file_data[accessor_string]
+            return file_data[proto_args.accessor_string]
         except KeyError:
             # construct new args
             if self_.calculatingp:
-                file_data[accessor_string] = \
+                file_data[proto_args.accessor_string] = \
                     getattr(self_, 'calculate_'+data_name) \
-                        (*calcargs, params=params, **calckwargs)
-                self_.changed_dirs.add(os.path.dirname(file_path))
+                        (*proto_args.calcargs(),
+                         params=params,
+                         **proto_args.calckwargs())
+                for path in proto_args.paths:
+                    self_.changed_dirs.add(os.path.dirname(path))
                 self_.update_caches()
-                return file_data[accessor_string]
+                return file_data[proto_args.accessor_string]
             else:
                 raise KeyError('That file\'s not in the cache.')
     get.__name__ = 'get_'+data_name
@@ -246,21 +218,21 @@ def make_PDBDataBuffer_get(data_name):
 
 def make_PDBDataBuffer_gather(data_name):
     '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
-    on a list of filenames instead of a single filename.'''
-    def gather(self_, file_list, *args, params=None, **kwargs):
-        abspaths = tuple(os.path.abspath(path) for path in file_list)
+    on a list of values for the first argument,  instead of a single value.'''
+    def gather(self_, l, *args, params=None, **kwargs):
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
-            for file_path in abspaths:
+            for item in l:
                 try:
                     result.append(
                         getattr(self_, 'get_'+data_name) \
-                                   (file_path, *args,
+                                   (item, *args,
                                     params=params, **kwargs))
                 except KeyError:
                     pass
             return result
         else:
+            # TODO: UNBREAK DUE TO REORG
             # getting this instead of a path makes a worker thread die:
             QUIT_GATHERING_SIGNAL = -1
             READY_TAG = 0 # used once by worker, to sync startup
@@ -273,16 +245,17 @@ def make_PDBDataBuffer_gather(data_name):
                 current_file_index = 0
                 working_threads = MPISIZE-1
                 def save_result(result):
-                    file_info_dict, file_data, accessor_string = result
+                    result_proto_args, result_data = result
                     DEBUG_OUT('about to save result for '+file_info_dict['path'])
-                    self_.pdb_paths[file_info_dict['path']] = \
-                        {'mtime': file_info_dict['mtime'],
-                         'hash':  file_info_dict['hash']}
-                    self_.data.setdefault(file_info_dict['hash'], {}) \
+                    result_proto_args.file_paths = self_.file_paths
+                    result_proto_args.update_paths()
+                    self_.data.setdefault(result_proto_args.pdbhash, {}) \
                               .setdefault(data_name, {}) \
-                              [accessor_string] = file_data
-                    file_indices_dict[file_info_dict['path']] = \
-                        (file_info_dict['hash'], data_name, accessor_string)
+                              [result_proto_args.accessor_string] = file_data
+                    file_indices_dict[result_proto_args.pdbpath] = \
+                        (result_proto_args.pdbhash,
+                         data_name,
+                         result_proto_args.accessor_string)
                     DEBUG_OUT('just saved result for '+file_info_dict['path'])
                 for dirname in set((os.path.dirname(path) \
                                     for path in abspaths)):
@@ -337,9 +310,7 @@ def make_PDBDataBuffer_gather(data_name):
                         working_threads -= 1
                     if result_tag == DONE_TAG:
                         save_result(result)
-                        self_.changed_dirs.add(
-                            os.path.dirname(
-                                result[0]['path']))
+                        self_.changed_dirs.update(result[0].paths)
                         self_.update_caches()
                     if working_threads <= 0:
                         break
@@ -527,7 +498,7 @@ class PDBDataBuffer():
                         pass
                 if retrieved is not None:
                     DEBUG_OUT('cache retrieved')
-                    diskdata, disk_pdb_info = retrieved
+                    diskdata, disk_file_paths = retrieved
                     for content_key, content in diskdata.items():
                         #DEBUG_OUT('reading data for content key '+content_key)
                         for data_name, data_keys in content.items():
@@ -540,10 +511,10 @@ class PDBDataBuffer():
                                 self.data[content_key] \
                                          [data_name] \
                                          [str(data_key)] = data
-                    for name, info_pair in disk_pdb_info.items():
+                    for name, info_pair in disk_file_paths.items():
                         DEBUG_OUT('saving info for '+name)
                         path = os.path.join(absdirpath, name)
-                        our_info_pair = self.file_paths.get(pdb_path, None)
+                        our_info_pair = self.file_paths.get(path, None)
                         ourfilemtime = None
                         if our_info_pair is not None:
                             ourfilemtime = our_info_pair['mtime']
@@ -597,13 +568,134 @@ class PDBDataBuffer():
             DEBUG_OUT('wrote cache file at ', cache_path)
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
             self.changed_dirs = set()
+    ## Auxiliary stuff
+    def proto_args(self, data_name, args, kwargs):
+        '''Given a set of args for a get_ accessor method, generate a
+        corresponding set of args where streams and paths are replaced with
+        encapsulated versions of the file paths passed to the accessor. Also
+        returns the index of the first stream or path arg (which is assumed to
+        be the PDB under whose hash the calculation is supposed to be
+        filed).'''
+        class ProtoArgs():
+            def __init__(self_):
+                self_.indices = []
+                self_.args   = []
+                self_.kwargs = {}
+                self_.args_types   = []
+                self_.kwargs_types = {}
+                self_.paths = []
+                self_.pdbpath = ''
+                self_.pdbhash = ''
+                self_.accessor_string = ''
+                self_.file_paths = self.file_paths
+                argspec = inspect.getfullargspec(
+                              getattr(self_, 'calculate_'+data_name))
+                accessor_list = []
+                # I feel justified copy/pasting all this code, because I might
+                # want to make it behave in a more specialized manner later
+                def check_if_first_path_arg(encapsulated):
+                    if len(self_.paths) == 1:
+                        self_.pdbpath = encapsulated.path
+                        self_.pdbhash = encapsulated.hash
+                for i, arg in enumerate(argspec.args[:-len(argspec.defaults)]):
+                    self_.indices.append(i)
+                    if arg.endswith('stream'):
+                        encapsulated = self.encapsulate_file(args[i])
+                        encapsulated.file_paths_dict = \
+                            self_.file_paths[encapsulated.path]
+                        self_.args.append(encapsulated)
+                        self_.args_types.append('stream')
+                        self_.paths.append(encapsulated.path)
+                        accessor_list.append(encapsulated.hash)
+                        check_if_first_path_arg(encapsulated)
+                    elif arg.endswith('path'):
+                        encapsulated = self.encapsulate_file(args[i])
+                        encapsulated.file_paths_dict = \
+                            self_.file_paths[encapsulated.path]
+                        self_.args.append(encapsulated)
+                        self_.args_types.append('path')
+                        self_.paths.append(encapsulated.path)
+                        accessor_list.append(encapsulated.hash)
+                        check_if_first_path_arg(encapsulated)
+                    else:
+                        self_.args.append(args[i])
+                        self_.args_types.append('other')
+                        accessor_list.append(args[i])
+                # +1 in the slice so that we skip over params:
+                for kwarg in (argspec.args[len(argspec.defaults)+1:] + \
+                              argspec.kwonlyargs):
+                    self_.indices.append(kwarg)
+                    if kwarg.endswith('stream'):
+                        encapsulated = self.encapsulate_file(kwargs[kwarg])
+                        encapsulated.file_paths_dict = \
+                            self_.file_paths[encapsulated.path]
+                        self_.kwargs[kwarg] = encapsulated
+                        self_.kwargs_types[kwarg] = 'stream'
+                        self_.paths.append(encapsulated.path)
+                        accessor_list.append(encapsulated.hash)
+                        check_if_first_path_arg(encapsulated)
+                    elif kwarg.endswith('path'):
+                        encapsulated = self.encapsulate_file(kwargs[kwarg])
+                        encapsulated.file_paths_dict = \
+                            self_.file_paths[encapsulated.path]
+                        self_.kwargs[kwarg] = encapsulated
+                        self_.kwargs_types[kwarg] = 'path'
+                        self_.paths.append(encapsulated.path)
+                        accessor_list.append(encapsulated.hash)
+                        check_if_first_path_arg(encapsulated)
+                    else:
+                        self_.kwargs[kwarg] = kwargs[kwarg]
+                        self_.kwargs_types[kwarg] = 'other'
+                        accessor_list.append(kwargs[kwarg])
+                self.accessor_string = str(tuple(accessor_list))
+            def __getitem__(self_, index):
+                if isinstance(index, int):
+                    return self.args[index]
+                else:
+                    return self.kwargs[index]
+            def __iter__(self_):
+                nargs = len(self_.args)
+                return itertools.chain((self_.args[i] for i in range(nargs)),
+                                       (self_.kwargs[i] \
+                                        for i in self_.indices[nargs:]))
+            def calcargs(self_):
+                # This whole method could be redone as a list comprehension.
+                # Future self: I dare you to rewrite it as one.
+                retlist = []
+                for arg, arg_type in zip(self_.args, self_.args_types):
+                    if arg_type == 'stream':
+                        retlist.append(arg.get_stream())
+                    elif arg_type == 'path':
+                        retlist.append(arg.path)
+                    else:
+                        retlist.append(arg)
+                return retlist
+            def calckwargs(self_):
+                retdict = {}
+                for kwarg, kwarg_value in self_.kwargs.items():
+                    if self_.kwargs_types[kwarg] == 'stream':
+                        retdict[kwarg] = kwarg_value.get_stream()
+                    elif self_.kwargs_types[kwarg] == 'path':
+                        retdict[kwarg] = kwarg_value.path
+                    else:
+                        retdict[kwarg] = kwarg_value
+                return retdict
+            def update_paths(self_):
+                for arg, arg_type in zip(self_.args, self_.args_types):
+                    if arg_type in ('stream', 'path'):
+                        arg.update_file_paths_dict()
+                for kwarg, kwarg_value in self_.kwargs.items():
+                    if self_.kwargs_types[kwarg] in ('stream', 'path'):
+                        kwarg_value.update_file_paths_dict()
+        return ProtoArgs()
+       
     def encapsulate_file(self, path):
-        '''Returns an object that in theory contains the absolute path, mtime, contents
-        hash, and maybe contents of a file. The first three are accessed
-        directly, while the last is accessed via an accessor method, so that it
-        can be retrieved if necessary. Creating and updating the object both
-        update the external PDBDataBuffer's info on that pdb.'''
-        class FileInfo():
+        '''Returns an object that in theory contains the absolute path, mtime,
+        contents hash, and maybe contents of a file. The first three are
+        accessed directly, while the last is accessed via an accessor method,
+        so that it can be retrieved if necessary. Creating and updating the
+        object both update the external PDBDataBuffer's info on that pdb.'''
+        class EncapsulatedFile():
             def __init__(self_, path_):
                 self_.path = os.path.abspath(path_)
                 self_.file_paths_dict = \
@@ -614,6 +706,9 @@ class PDBDataBuffer():
                 diskmtime = os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.hash is None:
                     self_.update(diskmtime)
+            def update_file_paths_dict(self_):
+                self_.file_paths_dict['mtime'] = self_.mtime
+                self_.file_paths_dict['hash'] = self_.hash
             def update(self_, mtime = None):
                 diskmtime = mtime or os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.contents is None:
@@ -624,14 +719,11 @@ class PDBDataBuffer():
                     hash_fun.update(self_.contents.encode())
                     self_.hash = hash_fun.hexdigest()
                     self_.stream = io.StringIO(contents)
-                    self_.file_paths_dict['mtime'] = self_.mtime
-                    self_.file_paths_dict['hash'] = self_.hash
+                    self_.update_file_paths_dict()
             def get_stream(self_, mtime = None):
                 self_.update(mtime)
                 return self_.stream
-        return FileInfo(path)
-
-    ## Auxiliary stuff
+        return EncapsulatedFile(path)
 
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
