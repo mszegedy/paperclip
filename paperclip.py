@@ -218,16 +218,46 @@ def make_PDBDataBuffer_get(data_name):
 
 def make_PDBDataBuffer_gather(data_name):
     '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
-    on a list of values for the first argument,  instead of a single value.'''
-    def gather(self_, l, *args, params=None, **kwargs):
+    on a list of values for an argument,  instead of a single value.'''
+    def gather(self_, *args, params=None, **kwargs, argi=0):
+        # New keyword argument argi: which argument is to be made into a list.
+        # If it is a number, then it corresponds to a positional argument
+        # (params included in the numbering, but self not). If it is a string,
+        # then it corresponds to /any/ argument with the name of the string
+        # (which could be a required positional argument). It may also be a
+        # list of such indices, to listify for all of those.
+        def unpacked_args(argi):
+            '''A generator that will come up with a tuple of (args, params,
+            ukwargs) until all the requested combinations have been done.'''
+            std_argi = argi
+            if not hasattr(std_argi, '__iter__'):
+                std_argi = [std_argi]
+            for i in std_argi:
+                argspec = inspect.getfullargspec(
+                    getattr(self_, 'calculate_'+data_name))
+                if isinstance(i, int):
+                    # -1 to account for self arg
+                    if i >= len(argspec.args) - len(argspec.defaults) - 1:
+                        # again, +1 to account for self arg
+                        for value in kwargs[argspec[i+1]]:
+                            newkwargs = copy.deepcopy(kwargs)
+                            newkwargs[argspec[i+1]] = value
+                            yield (args, params, newkwargs)
+                    else:
+                        for value in args[i]:
+                            newargs = copy.deepcopy(args)
+                            newargs[i] = value
+                            yield (newargs, params, kwargs)
+                elif isinstance(i, str):
+                    if i in argspec.args:
+                        for value in argspec.defaults[argspec.args.index(i) + TODO]: #TODO
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
-            for item in l:
+            for uargs, uparams, ukwargs in unpacked_args(args, params, kwargs,
+                                                         argi):
                 try:
-                    result.append(
-                        getattr(self_, 'get_'+data_name) \
-                                   (item, *args,
-                                    params=params, **kwargs))
+                    result.append(getattr(self_, 'get_'+data_name) \
+                                         (*uargs, params=uparams, **ukwargs))
                 except KeyError:
                     pass
             return result
@@ -462,9 +492,9 @@ class PDBDataBuffer():
                     types.MethodType(make_PDBDataBuffer_gather(data_name),
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
-        '''Retrieves data from a cache file of a directory. The data in the
-        file is a JSON of a data dict of a PDBDataBuffer, except instead of
-        file paths, it has just filenames.'''
+        '''Retrieves data from a cache file of a directory. The data in the file
+        is a JSON of a data dict of a PDBDataBuffer, except instead of file
+        paths, it has just filenames.'''
         if MPIRANK != 0:
             return
         absdirpath = os.path.abspath(dirpath)
@@ -570,12 +600,18 @@ class PDBDataBuffer():
             self.changed_dirs = set()
     ## Auxiliary stuff
     def proto_args(self, data_name, args, kwargs):
-        '''Given a set of args for a get_ accessor method, generate a
-        corresponding set of args where streams and paths are replaced with
-        encapsulated versions of the file paths passed to the accessor. Also
-        returns the index of the first stream or path arg (which is assumed to
-        be the PDB under whose hash the calculation is supposed to be
-        filed).'''
+        '''Given a set of args for a get_ accessor method, generate an object
+        that PDBDataBuffer accessor methods can use to both call calculate_
+        methods and index into self.data and self.paths, based on
+        EncapsulatedFile encapsulations of all of the paths passed to it. It
+        stores a list and dict of the arg values with paths replaced by
+        EncapsulatedFiles, a corresponding list and dict of arg types ('path',
+        'stream', or 'other' depending on what arg is requested by the
+        calculate_ method), and the path to the first PDB in the args, its
+        contents hash, and the accessor string for the args (for indexing into
+        self.data). It can also be iterated over to provide the arg values in
+        the sequence in which they were originally part of the calculate_
+        method, but this feature is not currently in use.'''
         class ProtoArgs():
             def __init__(self_):
                 self_.indices = []
@@ -597,7 +633,9 @@ class PDBDataBuffer():
                     if len(self_.paths) == 1:
                         self_.pdbpath = encapsulated.path
                         self_.pdbhash = encapsulated.hash
-                for i, arg in enumerate(argspec.args[:-len(argspec.defaults)]):
+                # start from 1 because we skip over self
+                for i, arg in enumerate(argspec.args[1:-len(argspec.defaults)],
+                                        start=1):
                     self_.indices.append(i)
                     if arg.endswith('stream'):
                         encapsulated = self.encapsulate_file(args[i])
@@ -622,7 +660,7 @@ class PDBDataBuffer():
                         self_.args_types.append('other')
                         accessor_list.append(args[i])
                 # +1 in the slice so that we skip over params:
-                for kwarg in (argspec.args[len(argspec.defaults)+1:] + \
+                for kwarg in (argspec.args[-len(argspec.defaults)+1:] + \
                               argspec.kwonlyargs):
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
@@ -688,7 +726,7 @@ class PDBDataBuffer():
                     if self_.kwargs_types[kwarg] in ('stream', 'path'):
                         kwarg_value.update_file_paths_dict()
         return ProtoArgs()
-       
+
     def encapsulate_file(self, path):
         '''Returns an object that in theory contains the absolute path, mtime,
         contents hash, and maybe contents of a file. The first three are
@@ -1034,7 +1072,7 @@ commands run indefinitely.
                 print('Invalid output path.')
         else:
             print('Invalid output format.')
-            
+
     # Plot buffer
     def do_clear_plot(self, arg):
         '''Clear the plot buffer:  clear_plot'''
