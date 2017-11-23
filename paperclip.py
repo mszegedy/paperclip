@@ -26,6 +26,7 @@ import sys, traceback, inspect
 import ast
 import fcntl
 ## Other stuff
+import decorator
 import timeout_decorator
 from mpi4py import MPI
 import dill
@@ -36,6 +37,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
+
+### Constants and messing around with libraries
 
 DEBUG = True
 
@@ -57,35 +60,34 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
 
 ### Decorators
 
-def needs_pr_init(f):
+@decorator.decorator
+def needs_pr_init(f, *args, **kwargs):
     '''Makes sure PyRosetta gets initialized before f is called.'''
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        global PYROSETTA_ENV
-        if not PYROSETTA_ENV.initp:
-            print('PyRosetta not initialized yet. Initializing...')
-            pr.init()
-            PYROSETTA_ENV.initp = True
-        return f(*args, **kwargs)
-    return decorated
-def needs_pr_scorefxn(f):
+    global PYROSETTA_ENV
+    if not PYROSETTA_ENV.initp:
+        print('PyRosetta not initialized yet. Initializing...')
+        pr.init()
+        PYROSETTA_ENV.initp = True
+    return f(*args, **kwargs)
+
+@decorator.decorator
+def needs_pr_scorefxn(f, *args, **kwargs):
     '''Makes sure the scorefxn exists before f is called. (In order for the
     scorefxn to exist, pr.init() needs to have been called, so @needs_pr_init
     is unnecessary in front of this.)'''
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        global PYROSETTA_ENV
-        if PYROSETTA_ENV.scorefxn is None:
-            print('Scorefxn not initialized yet. Initializing from defaults...')
-            PYROSETTA_ENV.set_scorefxn()
-        return f(*args, **kwargs)
-    return decorated
+    global PYROSETTA_ENV
+    if PYROSETTA_ENV.scorefxn is None:
+        print('Scorefxn not initialized yet. Initializing from defaults...')
+        PYROSETTA_ENV.set_scorefxn()
+    return f(*args, **kwargs)
+
 def uses_pr_env(f):
     '''Sets an attribute on the function that tells PDBDataBuffer to include a
     hash of the PyRosetta env as a storage key for the output of this function.
     Useless for functions that aren't calculate_ methods in PDBDataBuffer.'''
     f.uses_pr_env_p = True
     return f
+
 def times_out(f):
     '''Makes a function time out after it hits self.timelimit.'''
     @functools.wraps(f)
@@ -99,6 +101,7 @@ def times_out(f):
         else:
             return f(self_, *args, **kwargs)
     return decorated
+
 def continuous(f):
     '''Makes a function in OurCmdLine repeat forever when continuous mode is
     enabled, and decorates it with times_out.'''
@@ -111,6 +114,7 @@ def continuous(f):
         else:
             return f(self_, *args, **kwargs)
     return decorated
+
 def pure_plotting(f):
     '''Wraps "pure plotting" cmd commands that shouldn't be executed unless
     plotting is enabled.'''
@@ -123,12 +127,18 @@ def pure_plotting(f):
     return decorated
 
 ### Useful functions
-# vanilla stuff
+## vanilla stuff
+
 def DEBUG_OUT(*args, **kwargs):
     if DEBUG:
         print('DEBUG: ', end='')
         kwargs['flush'] = True
         print(*args, **kwargs)
+    try:
+        return(args[0])
+    except IndexError:
+        pass
+
 def get_filenames_from_dir_with_extension(dir_path, extension,
                                           strip_extensions_p=False):
     '''Returns a list of files from a directory with the path stripped, and
@@ -148,6 +158,7 @@ def get_filenames_from_dir_with_extension(dir_path, extension,
             for m \
             in [stripper.search(path) for path in path_list] \
             if m is not None]
+
 def process_limits(limits):
     '''Processes a limits arg for the cmd object. Returns a list of
     [lower_limit, upper_limit]. Sadly still has to be wrapped in a try/catch on
@@ -155,6 +166,7 @@ def process_limits(limits):
     return [(None if val.lower() in ('same', 'unbound', 'none') \
              else float(val)) \
             for val in limits]
+
 def process_params(params):
     '''Process params list so that .params is appended if a path doesn't end
     with it.'''
@@ -164,7 +176,9 @@ def process_params(params):
                 for param in params]
     else:
         return None
-# Rosetta stuff
+
+## Rosetta stuff
+
 @needs_pr_init
 def pose_from_contents(contents, params=None):
     '''Returns a Pose of a given pdb file contents string.'''
@@ -181,7 +195,9 @@ def pose_from_stream(stream, params=None):
     PDB.'''
     # not gonna bother rewinding stream
     return pose_from_contents(stream.read(), params)
-# functions to generate different types of accessors for PDBDataBuffer
+
+## PDBDataBuffer accessor makers
+
 def make_PDBDataBuffer_get(data_name):
     '''Create a get_ accessor function for a PDBDataBuffer data type.'''
     # Python duck typing philosophy says we shouldn't do any explicit
@@ -205,8 +221,8 @@ def make_PDBDataBuffer_get(data_name):
                         (*proto_args.calcargs(),
                          params=params,
                          **proto_args.calckwargs())
-                for path in proto_args.paths:
-                    self_.changed_dirs.add(os.path.dirname(path))
+                self_.changed_dirs.update(os.path.dirname(path) \
+                                          for path in proto_args.paths)
                 self_.update_caches()
                 return file_data[proto_args.accessor_string]
             else:
@@ -219,42 +235,55 @@ def make_PDBDataBuffer_get(data_name):
 def make_PDBDataBuffer_gather(data_name):
     '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
     on a list of values for an argument,  instead of a single value.'''
-    def gather(self_, *args, params=None, **kwargs, argi=0):
+    def gather(self_, *args, params=None, argi=0, **kwargs):
         # New keyword argument argi: which argument is to be made into a list.
         # If it is a number, then it corresponds to a positional argument
         # (params included in the numbering, but self not). If it is a string,
         # then it corresponds to /any/ argument with the name of the string
         # (which could be a required positional argument). It may also be a
         # list of such indices, to listify for all of those.
-        def unpacked_args(argi):
+        def unpack_args():
             '''A generator that will come up with a tuple of (args, params,
             ukwargs) until all the requested combinations have been done.'''
-            std_argi = argi
+            # (also I have a strong feeling this could all be rewritten more
+            #  concisely, but I have no idea how to make it happen)
+            std_argi = copy.deepcopy(argi)
             if not hasattr(std_argi, '__iter__'):
                 std_argi = [std_argi]
-            for i in std_argi:
-                argspec = inspect.getfullargspec(
-                    getattr(self_, 'calculate_'+data_name))
-                if isinstance(i, int):
-                    # -1 to account for self arg
-                    if i >= len(argspec.args) - len(argspec.defaults) - 1:
-                        # again, +1 to account for self arg
-                        for value in kwargs[argspec[i+1]]:
-                            newkwargs = copy.deepcopy(kwargs)
-                            newkwargs[argspec[i+1]] = value
-                            yield (args, params, newkwargs)
-                    else:
-                        for value in args[i]:
-                            newargs = copy.deepcopy(args)
-                            newargs[i] = value
-                            yield (newargs, params, kwargs)
-                elif isinstance(i, str):
-                    if i in argspec.args:
-                        for value in argspec.defaults[argspec.args.index(i) + TODO]: #TODO
+            argspec = inspect.getfullargspec(
+                getattr(self_, 'calculate_'+data_name))
+            lendefaults = len(argspec.defaults) \
+                              if argspec.defaults is not None \
+                          else 0
+            # Functional CodeTM
+            for combo in itertools.product(
+                *(((kwargs[argspec.args[i+1]] if i >= len(argspec.args) - \
+                                                      lendefaults - 1 \
+                    else args[i]) if isinstance(i, int) \
+                   else (params if i == 'params' \
+                         else kwargs[i]) if isinstance(i, str) else None) \
+                  for i in std_argi)):
+                newargs   = list(copy.copy(args))
+                newparams = copy.copy(params)
+                newkwargs = copy.copy(kwargs)
+                combo_gen = (value for value in combo)
+                for i in std_argi:
+                    if isinstance(i, int):
+                        # -1 to account for self arg
+                        if i >= len(argspec.args) - lendefaults - 1:
+                            # again, +1 to account for self arg
+                            newkwargs[argspec.args[i+1]] = next(combo_gen)
+                        else:
+                            newargs[i] = next(combo_gen)
+                    elif isinstance(i, str):
+                        if i == 'params':
+                            newparams = next(combo_gen)
+                        else:
+                            newkwargs[i] = next(combo_gen)
+                yield (newargs, newparams, newkwargs)
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
-            for uargs, uparams, ukwargs in unpacked_args(args, params, kwargs,
-                                                         argi):
+            for uargs, uparams, ukwargs in unpack_args():
                 try:
                     result.append(getattr(self_, 'get_'+data_name) \
                                          (*uargs, params=uparams, **ukwargs))
@@ -262,113 +291,93 @@ def make_PDBDataBuffer_gather(data_name):
                     pass
             return result
         else:
-            # TODO: UNBREAK DUE TO REORG
             # getting this instead of a path makes a worker thread die:
             QUIT_GATHERING_SIGNAL = -1
             READY_TAG = 0 # used once by worker, to sync startup
             DONE_TAG  = 1 # used by worker to pass result and request new job
             WORK_TAG  = 2 # used by master to pass next path to worker
             # will be used to index into self_.data to retrieve final result:
-            file_indices_dict = {}
-            DEBUG_OUT('retrieving caches for gather_ operation')
+            file_indices_list = []
             if MPIRANK == 0:
-                current_file_index = 0
-                working_threads = MPISIZE-1
-                def save_result(result):
-                    result_proto_args, result_data = result
-                    DEBUG_OUT('about to save result for '+file_info_dict['path'])
-                    result_proto_args.file_paths = self_.file_paths
-                    result_proto_args.update_paths()
-                    self_.data.setdefault(result_proto_args.pdbhash, {}) \
+                ## helper functions
+                def recv_result():
+                    return (MPICOMM.recv(source=MPI.ANY_SOURCE,
+                                         tag=MPI.ANY_TAG,
+                                         status=MPISTATUS),
+                            MPISTATUS.Get_source(),
+                            MPISTATUS.Get_tag())
+                def save_result(proto_args, result_data):
+                    DEBUG_OUT('about to save result for ' + proto_args.pdbpath)
+                    proto_args.file_paths = self_.file_paths
+                    proto_args.update_paths()
+                    self_.data.setdefault(proto_args.pdbhash, {}) \
                               .setdefault(data_name, {}) \
-                              [result_proto_args.accessor_string] = file_data
-                    file_indices_dict[result_proto_args.pdbpath] = \
-                        (result_proto_args.pdbhash,
-                         data_name,
-                         result_proto_args.accessor_string)
-                    DEBUG_OUT('just saved result for '+file_info_dict['path'])
-                for dirname in set((os.path.dirname(path) \
-                                    for path in abspaths)):
-                    DEBUG_OUT('retrieving caches for '+dirname)
-                    self_.retrieve_data_from_cache(dirname)
-                DEBUG_OUT('all caches retrieved')
-                while True:
-                    result = MPICOMM.recv(source=MPI.ANY_SOURCE,
-                                          tag=MPI.ANY_TAG,
-                                          status=MPISTATUS)
-                    result_source = MPISTATUS.Get_source()
-                    result_tag    = MPISTATUS.Get_tag()
-                    DEBUG_OUT('data received from '+str(result_source))
-                    # try to find a PDB we don't have the data for yet:
-                    while current_file_index < len(abspaths):
-                        file_path = abspaths[current_file_index]
-                        file_info = self_.get_pdb_file_info(file_path)
-                        file_data = self_.data.setdefault(file_info.hash, {}) \
-                                              .setdefault(data_name, {})
-                        kwargs_args_list = list(kwargs.keys())
-                        kwargs_args_list.sort()
-                        accessor_string = str(tuple(args) + \
-                                              tuple(kwargs[arg] \
-                                                    for arg \
-                                                    in kwargs_args_list))
-                        file_info_dict = {'path':  file_info.path,
-                                          'mtime': file_info.mtime,
-                                          'hash':  file_info.hash}
-                        try:
-                            save_result([file_info_dict,
-                                         file_data[accessor_string],
-                                         accessor_string])
-                            DEBUG_OUT('increasing current_file_index from %d to %d' % \
-                                      (current_file_index, current_file_index+1))
-                            current_file_index += 1
-                        except KeyError:
-                            break
-                    if current_file_index < len(abspaths):
-                        DEBUG_OUT('assigning ' + file_info.path+' to ' + \
+                              [proto_args.accessor_string] = result_data
+                    file_indices_list.append([proto_args.pdbhash,
+                                              data_name,
+                                              proto_args.accessor_string])
+                    DEBUG_OUT('just saved result for ' + proto_args.pdbpath)
+                ## main loop
+                for uargs, uparams, ukwargs in unpack_args():
+                    proto_args = self_.proto_args(data_name, uargs, ukwargs)
+                    # lazy cache retrieval!
+                    for path in proto_args.paths:
+                        self_.retrieve_data_from_cache(os.path.dirname(path))
+                    file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
+                                          .setdefault(data_name, {})
+                    try:
+                        save_result(proto_args,
+                                    file_data[proto_args.accessor_string])
+                    except KeyError:
+                        result, result_source, result_tag = recv_result()
+                        proto_args.file_paths = None
+                        DEBUG_OUT('assigning '+proto_args.pdbpath+' to ' + \
                                   str(result_source))
-                        MPICOMM.send([file_info_dict,
-                                      file_path,
-                                      accessor_string],
+                        MPICOMM.send([proto_args, uparams],
                                      dest=result_source, tag=WORK_TAG)
                         DEBUG_OUT('assignment sent')
-                        current_file_index += 1
-                    else:
-                        DEBUG_OUT('all files done. killing '+str(result_source))
-                        MPICOMM.send(QUIT_GATHERING_SIGNAL,
-                                     dest=result_source, tag=WORK_TAG)
-                        DEBUG_OUT('worker killed')
-                        working_threads -= 1
+                        if result_tag == DONE_TAG:
+                            save_result(*result)
+                            self_.changed_dirs.update(os.path.dirname(path) \
+                                                      for path \
+                                                      in result[0].paths)
+                            self_.update_caches()
+                ## clean up workers once we run out of stuff to assign
+                for _ in range(MPISIZE-1):
+                    result, result_source, result_tag = recv_result()
+                    DEBUG_OUT('data received from '+str(result_source))
                     if result_tag == DONE_TAG:
-                        save_result(result)
-                        self_.changed_dirs.update(result[0].paths)
+                        save_result(*result)
+                        self_.changed_dirs.update(os.path.dirname(path) \
+                                                  for path in result[0].paths)
                         self_.update_caches()
-                    if working_threads <= 0:
-                        break
+                    DEBUG_OUT('all files done. killing '+str(result_source))
+                    MPICOMM.send(QUIT_GATHERING_SIGNAL,
+                                 dest=result_source, tag=WORK_TAG)
+                    DEBUG_OUT('worker killed')
             else:
                 MPICOMM.send(None, dest=0, tag=READY_TAG)
                 while True:
                     package = MPICOMM.recv(source=0, tag=WORK_TAG)
                     if package == QUIT_GATHERING_SIGNAL:
                         break
-                    file_info_dict, file_path, accessor_string = package
-                    contents = open(file_path, 'r').read()
+                    proto_args, params = package
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
-                            (contents, *args,
-                             params=params, **kwargs)
-                    MPICOMM.send(copy.deepcopy([file_info_dict,
-                                                result_data,
-                                                accessor_string]),
+                            (*proto_args.calcargs(),
+                             params=params,
+                             **proto_args.calckwargs())
+                    MPICOMM.send(copy.copy([proto_args,
+                                            result_data]),
                                  dest=0, tag=DONE_TAG)
             # Synchronize everything that could have possibly changed:
             self_.data = MPICOMM.bcast(self_.data, root=0)
-            self_.file_paths = MPICOMM.bcast(self_.pdb_paths, root=0)
+            self_.file_paths = MPICOMM.bcast(self_.file_paths, root=0)
             self_.cache_paths = MPICOMM.bcast(self_.cache_paths, root=0)
-            file_indices_dict = MPICOMM.bcast(file_indices_dict, root=0)
+            file_indices_list = MPICOMM.bcast(file_indices_list, root=0)
             # All threads should be on the same page at this point.
             retlist = []
-            for path in abspaths:
-                indices = file_indices_dict[path]
+            for indices in file_indices_list:
                 retlist.append(self_.data[indices[0]][indices[1]][indices[2]])
             return retlist
     gather.__name__ = 'gather_'+data_name
@@ -625,7 +634,7 @@ class PDBDataBuffer():
                 self_.accessor_string = ''
                 self_.file_paths = self.file_paths
                 argspec = inspect.getfullargspec(
-                              getattr(self_, 'calculate_'+data_name))
+                              getattr(self, 'calculate_'+data_name))
                 accessor_list = []
                 # I feel justified copy/pasting all this code, because I might
                 # want to make it behave in a more specialized manner later
@@ -633,9 +642,15 @@ class PDBDataBuffer():
                     if len(self_.paths) == 1:
                         self_.pdbpath = encapsulated.path
                         self_.pdbhash = encapsulated.hash
+                lendefaults = len(argspec.defaults) \
+                                  if argspec.defaults is not None \
+                              else 0
                 # start from 1 because we skip over self
-                for i, arg in enumerate(argspec.args[1:-len(argspec.defaults)],
-                                        start=1):
+                if lendefaults > 0:
+                    positargs = argspec.args[1:-lendefaults]
+                else:
+                    positargs = argspec.args[1:]
+                for i, arg in enumerate(positargs):
                     self_.indices.append(i)
                     if arg.endswith('stream'):
                         encapsulated = self.encapsulate_file(args[i])
@@ -660,8 +675,12 @@ class PDBDataBuffer():
                         self_.args_types.append('other')
                         accessor_list.append(args[i])
                 # +1 in the slice so that we skip over params:
-                for kwarg in (argspec.args[-len(argspec.defaults)+1:] + \
-                              argspec.kwonlyargs):
+                if lendefaults > 1:
+                    namedargs = (argspec.args[-lendefaults+1:] + \
+                                 argspec.kwonlyargs)
+                else:
+                    namedargs =  tuple(argspec.kwonlyargs)
+                for kwarg in (namedargs):
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
                         encapsulated = self.encapsulate_file(kwargs[kwarg])
@@ -686,6 +705,8 @@ class PDBDataBuffer():
                         self_.kwargs_types[kwarg] = 'other'
                         accessor_list.append(kwargs[kwarg])
                 self.accessor_string = str(tuple(accessor_list))
+                if self.accessor_string != '':
+                    DEBUG_OUT(self.accessor_string)
             def __getitem__(self_, index):
                 if isinstance(index, int):
                     return self.args[index]
@@ -749,12 +770,12 @@ class PDBDataBuffer():
                 self_.file_paths_dict['hash'] = self_.hash
             def update(self_, mtime = None):
                 diskmtime = mtime or os.path.getmtime(self_.path)
-                if diskmtime > self_.mtime or self_.contents is None:
+                if diskmtime > self_.mtime or self_.stream is None:
                     with open(self_.path, 'r') as pdb_file:
                         contents = pdb_file.read()
                     self_.mtime = diskmtime
                     hash_fun = hashlib.md5()
-                    hash_fun.update(self_.contents.encode())
+                    hash_fun.update(contents.encode())
                     self_.hash = hash_fun.hexdigest()
                     self_.stream = io.StringIO(contents)
                     self_.update_file_paths_dict()
@@ -771,7 +792,7 @@ class PDBDataBuffer():
     # a list instead of a single filename, but is actually concurrently
     # controlled if there are multiple processors available.
     @uses_pr_env
-    @needs_pr_init
+    @needs_pr_scorefxn
     def calculate_score(self, stream, params=None):
         '''Calculates the score of a protein from a stream of its PDB file.
         scorefxn_hash is not used inside the calculation, but is used for
@@ -782,15 +803,15 @@ class PDBDataBuffer():
         return PYROSETTA_ENV.scorefxn(pose)
     @needs_pr_init
     def calculate_rmsd(self, lhs_stream, rhs_stream, rmsd_type,
-                                      params=None):
+                       params=None):
         '''Calculates the RMSD of two proteins from each other and stores
         it, without assuming commutativity.'''
         pose_lhs = pose_from_stream(lhs_stream, params=params)
         pose_rhs = pose_from_stream(rhs_stream, params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
     @needs_pr_init
-    def calculate_neighbors(self, stream, coarsep=False, bound=None,
-                            params=None):
+    def calculate_neighbors(self, stream, params=None, coarsep=False,
+                            bound=None):
         '''Calculates the residue neighborhood matrix of a protein based on the
         provided contents of its PDB file.'''
         pose = pose_from_stream(stream, params=params)

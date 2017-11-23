@@ -12,5 +12,6 @@ Depends on:
   mpi4py                  (Python library)
   dill                    (Python library)
   matplotlib              (Python library)
+  decorator               (Python library)
   timeout_decorator       (Python library)
   
