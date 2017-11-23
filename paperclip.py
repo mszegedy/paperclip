@@ -502,8 +502,8 @@ class PDBDataBuffer():
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
         '''Retrieves data from a cache file of a directory. The data in the file
-        is a JSON of a data dict of a PDBDataBuffer, except instead of file
-        paths, it has just filenames.'''
+        is a JSON of a data dict and a file_paths list of a PDBDataBuffer,
+        except instead of file paths, it has just filenames.'''
         if MPIRANK != 0:
             return
         absdirpath = os.path.abspath(dirpath)
@@ -680,7 +680,9 @@ class PDBDataBuffer():
                                  argspec.kwonlyargs)
                 else:
                     namedargs =  tuple(argspec.kwonlyargs)
-                for kwarg in (namedargs):
+                namedargs = tuple(kwarg for kwarg in namedargs \
+                                  if kwarg in kwargs.keys())
+                for kwarg in namedargs:
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
                         encapsulated = self.encapsulate_file(kwargs[kwarg])
@@ -750,7 +752,7 @@ class PDBDataBuffer():
 
     def encapsulate_file(self, path):
         '''Returns an object that in theory contains the absolute path, mtime,
-        contents hash, and maybe contents of a file. The first three are
+        contents hash, and maybe contents stream of a file. The first three are
         accessed directly, while the last is accessed via an accessor method,
         so that it can be retrieved if necessary. Creating and updating the
         object both update the external PDBDataBuffer's info on that pdb.'''
@@ -791,6 +793,15 @@ class PDBDataBuffer():
     # gather_<whatever>, which outwardly looks like get_<whatever> operating on
     # a list instead of a single filename, but is actually concurrently
     # controlled if there are multiple processors available.
+    # These functions should take their args in the following format:
+    #   - self
+    #   - positional args, with at least one arg taking a PDB path or stream
+    #   - params arg
+    #   - other keyword args
+    # All values of all args need to either have a consistent string
+    # representation in Python, or need to end in "stream" and take a
+    # stream-like object, or need to end in "path" and take a string that is a
+    # path to a file.
     @uses_pr_env
     @needs_pr_scorefxn
     def calculate_score(self, stream, params=None):
