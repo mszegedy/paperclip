@@ -64,10 +64,7 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
 def needs_pr_init(f, *args, **kwargs):
     '''Makes sure PyRosetta gets initialized before f is called.'''
     global PYROSETTA_ENV
-    if not PYROSETTA_ENV.initp:
-        print('PyRosetta not initialized yet. Initializing...')
-        pr.init()
-        PYROSETTA_ENV.initp = True
+    PYROSETTA_ENV.init()
     return f(*args, **kwargs)
 
 @decorator.decorator
@@ -308,6 +305,7 @@ def make_PDBDataBuffer_gather(data_name):
                             MPISTATUS.Get_tag())
                 def save_result(proto_args, result_data):
                     DEBUG_OUT('about to save result for ' + proto_args.pdbpath)
+                    DEBUG_OUT('accessor string: ' + proto_args.accessor_string)
                     proto_args.file_paths = self_.file_paths
                     proto_args.update_paths()
                     self_.data.setdefault(proto_args.pdbhash, {}) \
@@ -320,6 +318,7 @@ def make_PDBDataBuffer_gather(data_name):
                 ## main loop
                 for uargs, uparams, ukwargs in unpack_args():
                     proto_args = self_.proto_args(data_name, uargs, ukwargs)
+                    DEBUG_OUT('accessor string from next item: ' + proto_args.accessor_string)
                     # lazy cache retrieval!
                     for path in proto_args.paths:
                         self_.retrieve_data_from_cache(os.path.dirname(path))
@@ -393,6 +392,11 @@ class PyRosettaEnv():
     def __init__(self):
         self.initp = False
         self.scorefxn = None
+    def init(self):
+        if not self.initp:
+            print('PyRosetta not initialized yet. Initializing...')
+            pr.init()
+            self.initp = True
     @needs_pr_init
     def set_scorefxn(self, name=None, patch=None):
         '''Sets the scorefxn and optionally applies a patch. Defaults to
@@ -623,6 +627,7 @@ class PDBDataBuffer():
         method, but this feature is not currently in use.'''
         class ProtoArgs():
             def __init__(self_):
+                global PYROSETTA_ENV
                 self_.indices = []
                 self_.args   = []
                 self_.kwargs = {}
@@ -631,10 +636,10 @@ class PDBDataBuffer():
                 self_.paths = []
                 self_.pdbpath = ''
                 self_.pdbhash = ''
-                self_.accessor_string = ''
                 self_.file_paths = self.file_paths
-                argspec = inspect.getfullargspec(
-                              getattr(self, 'calculate_'+data_name))
+                self_.accessor_string = ''
+                calcfxn = getattr(self, 'calculate_'+data_name)
+                argspec = inspect.getfullargspec(calcfxn)
                 accessor_list = []
                 # I feel justified copy/pasting all this code, because I might
                 # want to make it behave in a more specialized manner later
@@ -706,9 +711,10 @@ class PDBDataBuffer():
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
                         accessor_list.append(kwargs[kwarg])
-                self.accessor_string = str(tuple(accessor_list))
-                if self.accessor_string != '':
-                    DEBUG_OUT(self.accessor_string)
+                if hasattr(calcfxn, 'uses_pr_env_p'):
+                    PYROSETTA_ENV.init()
+                    accessor_list.append(PYROSETTA_ENV.get_hash())
+                self_.accessor_string = str(tuple(accessor_list))
             def __getitem__(self_, index):
                 if isinstance(index, int):
                     return self.args[index]
@@ -757,8 +763,8 @@ class PDBDataBuffer():
         so that it can be retrieved if necessary. Creating and updating the
         object both update the external PDBDataBuffer's info on that pdb.'''
         class EncapsulatedFile():
-            def __init__(self_, path_):
-                self_.path = os.path.abspath(path_)
+            def __init__(self_):
+                self_.path = os.path.abspath(path)
                 self_.file_paths_dict = \
                     self.file_paths.setdefault(self_.path, {})
                 self_.mtime = self_.file_paths_dict.setdefault('mtime', 0)
@@ -784,7 +790,7 @@ class PDBDataBuffer():
             def get_stream(self_, mtime = None):
                 self_.update(mtime)
                 return self_.stream
-        return EncapsulatedFile(path)
+        return EncapsulatedFile()
 
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
