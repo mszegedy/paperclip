@@ -215,9 +215,9 @@ def make_PDBDataBuffer_get(data_name):
             if self_.calculatingp:
                 file_data[proto_args.accessor_string] = \
                     getattr(self_, 'calculate_'+data_name) \
-                        (*proto_args.calcargs(),
+                        (*proto_args.calcargs,
                          params=params,
-                         **proto_args.calckwargs())
+                         **proto_args.calckwargs)
                 self_.changed_dirs.update(os.path.dirname(path) \
                                           for path in proto_args.paths)
                 self_.update_caches()
@@ -253,7 +253,8 @@ def make_PDBDataBuffer_gather(data_name):
             lendefaults = len(argspec.defaults) \
                               if argspec.defaults is not None \
                           else 0
-            # Functional CodeTM
+            # Using Functional CodeTM, do for all possible combinations of args
+            # from the lists received for the listified args:
             for combo in itertools.product(
                 *(((kwargs[argspec.args[i+1]] if i >= len(argspec.args) - \
                                                       lendefaults - 1 \
@@ -364,9 +365,9 @@ def make_PDBDataBuffer_gather(data_name):
                     proto_args, params = package
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
-                            (*proto_args.calcargs(),
+                            (*proto_args.calcargs,
                              params=params,
-                             **proto_args.calckwargs())
+                             **proto_args.calckwargs)
                     MPICOMM.send(copy.copy([proto_args,
                                             result_data]),
                                  dest=0, tag=DONE_TAG)
@@ -408,8 +409,9 @@ class PyRosettaEnv():
             self.scorefxn = pr.create_score_function(name)
         if patch:
             self.scorefxn.apply_patch_from_file(patch)
+    @property
     @needs_pr_scorefxn
-    def get_hash(self):
+    def hash(self):
         '''Gets a hash of the properties of the current env.'''
         hash_fun = hashlib.md5()
         weights = self.scorefxn.weights()
@@ -664,20 +666,14 @@ class PDBDataBuffer():
                     positargs = argspec.args[1:]
                 for i, arg in enumerate(positargs):
                     self_.indices.append(i)
-                    if arg.endswith('stream'):
+                    if arg.endswith('stream') or arg.endswith('path'):
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('stream')
-                    elif arg.endswith('path'):
-                        self_.args.append(handle_path_arg(args[i]))
-                        self_.args_types.append('path')
-                    elif arg.endswith('stream_list'):
+                    elif arg.endswith('stream_list') or \
+                         arg.endswith('path_list'):
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('stream_list')
-                    elif arg.endswith('path_list'):
-                        self_.args.append([handle_path_arg(path) \
-                                           for path in args[i]])
-                        self_.args_types.append('path_list')
                     else:
                         self_.args.append(args[i])
                         self_.args_types.append('other')
@@ -687,32 +683,26 @@ class PDBDataBuffer():
                     namedargs = (argspec.args[-lendefaults+1:] + \
                                  argspec.kwonlyargs)
                 else:
-                    namedargs =  tuple(argspec.kwonlyargs)
-                namedargs = tuple(kwarg for kwarg in namedargs \
-                                  if kwarg in kwargs.keys())
+                    namedargs =  argspec.kwonlyargs
+                namedargs = (kwarg for kwarg in namedargs \
+                             if kwarg in kwargs.keys())
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
-                    if kwarg.endswith('stream'):
+                    if kwarg.endswith('stream') or kwarg.endswith('path'):
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'stream'
-                    elif kwarg.endswith('path'):
-                        self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
-                        self_.kwargs_types[kwarg] = 'path'
-                    elif arg.endswith('stream_list'):
+                    elif kwarg.endswith('stream_list') or \
+                         kwarg.endswith('path_list'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'stream_list'
-                    elif arg.endswith('path_list'):
-                        self_.kwargs[kwarg] = [handle_path_arg(path) \
-                                               for path in kwargs[kwarg]]
-                        self_.kwargs_types[kwarg] = 'path_list'
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
                         accessor_list.append(kwargs[kwarg])
                 if hasattr(calcfxn, 'uses_pr_env_p'):
                     PYROSETTA_ENV.init()
-                    accessor_list.append(PYROSETTA_ENV.get_hash())
+                    accessor_list.append(PYROSETTA_ENV.hash)
                 self_.accessor_string = str(tuple(accessor_list))
             def __getitem__(self_, index):
                 if isinstance(index, int):
@@ -724,20 +714,21 @@ class PDBDataBuffer():
                 return itertools.chain((self_.args[i] for i in range(nargs)),
                                        (self_.kwargs[i] \
                                         for i in self_.indices[nargs:]))
+            @property
             def calcargs(self_):
                 # F U N C T I O N A L
-                return [{'stream':      lambda: arg.get_stream(),
+                return [{'stream':      lambda: arg.stream,
                          'path':        lambda: arg.path,
-                         'stream_list': lambda: [f.get_stream() for f in arg],
+                         'stream_list': lambda: [f.stream for f in arg],
                          'path_list':   lambda: [f.path for f in arg],
                         }.get(arg_type, lambda: arg)() \
                         for arg, arg_type in zip(self_.args, self_.args_types)]
+            @property
             def calckwargs(self_):
                 # P R O G R A M M I N G
-                return {kwarg:{'stream':      lambda: value.get_stream(),
+                return {kwarg:{'stream':      lambda: value.stream,
                                'path':        lambda: value.path,
-                               'stream_list': lambda: [f.get_stream() \
-                                                       for f in value],
+                               'stream_list': lambda: [f.stream for f in value],
                                'path_list':   lambda: [f.path for f in value],
                               }.get(self_.kwargs_types[kwarg], lambda: arg)() \
                         for kwarg, value, in self_.kwargs.items()}
@@ -770,7 +761,7 @@ class PDBDataBuffer():
                     self.file_paths.setdefault(self_.path, {})
                 self_.mtime = self_.file_paths_dict.setdefault('mtime', 0)
                 self_.hash = self_.file_paths_dict.setdefault('hash', None)
-                self_.stream = None
+                self_._stream = None
                 diskmtime = os.path.getmtime(self_.path)
                 if diskmtime > self_.mtime or self_.hash is None:
                     self_.update(diskmtime)
@@ -779,18 +770,19 @@ class PDBDataBuffer():
                 self_.file_paths_dict['hash'] = self_.hash
             def update(self_, mtime = None):
                 diskmtime = mtime or os.path.getmtime(self_.path)
-                if diskmtime > self_.mtime or self_.stream is None:
+                if diskmtime > self_.mtime or self_._stream is None:
                     with open(self_.path, 'r') as pdb_file:
                         contents = pdb_file.read()
                     self_.mtime = diskmtime
                     hash_fun = hashlib.md5()
                     hash_fun.update(contents.encode())
                     self_.hash = hash_fun.hexdigest()
-                    self_.stream = io.StringIO(contents)
+                    self_._stream = io.StringIO(contents)
                     self_.update_file_paths_dict()
-            def get_stream(self_, mtime = None):
+            @property
+            def stream(self_, mtime = None):
                 self_.update(mtime)
-                return self_.stream
+                return self_._stream
         return EncapsulatedFile()
 
     ## Calculating Rosetta stuff
