@@ -726,19 +726,20 @@ class PDBDataBuffer():
                                         for i in self_.indices[nargs:]))
             def calcargs(self_):
                 # F U N C T I O N A L
-                return [{'stream':      arg.get_stream(),
-                         'path':        arg.path,
-                         'stream_list': [f.get_stream() for f in arg],
-                         'path_list':   [f.path for f in arg],
-                        }.get(arg_type, arg) \
+                return [{'stream':      lambda: arg.get_stream(),
+                         'path':        lambda: arg.path,
+                         'stream_list': lambda: [f.get_stream() for f in arg],
+                         'path_list':   lambda: [f.path for f in arg],
+                        }.get(arg_type, lambda: arg)() \
                         for arg, arg_type in zip(self_.args, self_.args_types)]
             def calckwargs(self_):
                 # P R O G R A M M I N G
-                return {kwarg:{'stream':      value.get_stream(),
-                               'path':        value.path,
-                               'stream_list': [f.get_stream() for f in value],
-                               'path_list':   [f.path for f in value],
-                              }.get(self_.kwargs_types[kwarg], arg) \
+                return {kwarg:{'stream':      lambda: value.get_stream(),
+                               'path':        lambda: value.path,
+                               'stream_list': lambda: [f.get_stream() \
+                                                       for f in value],
+                               'path_list':   lambda: [f.path for f in value],
+                              }.get(self_.kwargs_types[kwarg], lambda: arg)() \
                         for kwarg, value, in self_.kwargs.items()}
             def update_paths(self_):
                 for arg, arg_type in zip(self_.args, self_.args_types):
