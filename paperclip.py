@@ -245,7 +245,8 @@ def make_PDBDataBuffer_gather(data_name):
             # (also I have a strong feeling this could all be rewritten more
             #  concisely, but I have no idea how to make it happen)
             std_argi = copy.deepcopy(argi)
-            if not hasattr(std_argi, '__iter__'):
+            if not hasattr(std_argi, '__iter__') and \
+               not isinstance(std_argi, str):
                 std_argi = [std_argi]
             argspec = inspect.getfullargspec(
                 getattr(self_, 'calculate_'+data_name))
@@ -611,7 +612,7 @@ class PDBDataBuffer():
             DEBUG_OUT('wrote cache file at ', cache_path)
             self.cache_paths[dir_path] = os.path.getmtime(cache_path)
             self.changed_dirs = set()
-    ## Auxiliary stuff
+    ## Auxiliary classes
     def proto_args(self, data_name, args, kwargs):
         '''Given a set of args for a get_ accessor method, generate an object
         that PDBDataBuffer accessor methods can use to both call calculate_
@@ -641,12 +642,18 @@ class PDBDataBuffer():
                 calcfxn = getattr(self, 'calculate_'+data_name)
                 argspec = inspect.getfullargspec(calcfxn)
                 accessor_list = []
-                # I feel justified copy/pasting all this code, because I might
-                # want to make it behave in a more specialized manner later
                 def check_if_first_path_arg(encapsulated):
                     if len(self_.paths) == 1:
                         self_.pdbpath = encapsulated.path
                         self_.pdbhash = encapsulated.hash
+                def handle_path_arg(path):
+                    encapsulated = self.encapsulate_file(path)
+                    encapsulated.file_paths_dict = \
+                        self_.file_paths[encapsulated.path]
+                    self_.paths.append(encapsulated.path)
+                    accessor_list.append(encapsulated.hash)
+                    check_if_first_path_arg(encapsulated)
+                    return encapsulated
                 lendefaults = len(argspec.defaults) \
                                   if argspec.defaults is not None \
                               else 0
@@ -658,23 +665,19 @@ class PDBDataBuffer():
                 for i, arg in enumerate(positargs):
                     self_.indices.append(i)
                     if arg.endswith('stream'):
-                        encapsulated = self.encapsulate_file(args[i])
-                        encapsulated.file_paths_dict = \
-                            self_.file_paths[encapsulated.path]
-                        self_.args.append(encapsulated)
+                        self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('stream')
-                        self_.paths.append(encapsulated.path)
-                        accessor_list.append(encapsulated.hash)
-                        check_if_first_path_arg(encapsulated)
                     elif arg.endswith('path'):
-                        encapsulated = self.encapsulate_file(args[i])
-                        encapsulated.file_paths_dict = \
-                            self_.file_paths[encapsulated.path]
-                        self_.args.append(encapsulated)
+                        self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('path')
-                        self_.paths.append(encapsulated.path)
-                        accessor_list.append(encapsulated.hash)
-                        check_if_first_path_arg(encapsulated)
+                    elif arg.endswith('stream_list'):
+                        self_.args.append([handle_path_arg(path) \
+                                           for path in args[i]])
+                        self_.args_types.append('stream_list')
+                    elif arg.endswith('path_list'):
+                        self_.args.append([handle_path_arg(path) \
+                                           for path in args[i]])
+                        self_.args_types.append('path_list')
                     else:
                         self_.args.append(args[i])
                         self_.args_types.append('other')
@@ -690,23 +693,19 @@ class PDBDataBuffer():
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
-                        encapsulated = self.encapsulate_file(kwargs[kwarg])
-                        encapsulated.file_paths_dict = \
-                            self_.file_paths[encapsulated.path]
-                        self_.kwargs[kwarg] = encapsulated
+                        self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'stream'
-                        self_.paths.append(encapsulated.path)
-                        accessor_list.append(encapsulated.hash)
-                        check_if_first_path_arg(encapsulated)
                     elif kwarg.endswith('path'):
-                        encapsulated = self.encapsulate_file(kwargs[kwarg])
-                        encapsulated.file_paths_dict = \
-                            self_.file_paths[encapsulated.path]
-                        self_.kwargs[kwarg] = encapsulated
+                        self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'path'
-                        self_.paths.append(encapsulated.path)
-                        accessor_list.append(encapsulated.hash)
-                        check_if_first_path_arg(encapsulated)
+                    elif arg.endswith('stream_list'):
+                        self_.kwargs[kwarg] = [handle_path_arg(path) \
+                                               for path in kwargs[kwarg]]
+                        self_.kwargs_types[kwarg] = 'stream_list'
+                    elif arg.endswith('path_list'):
+                        self_.kwargs[kwarg] = [handle_path_arg(path) \
+                                               for path in kwargs[kwarg]]
+                        self_.kwargs_types[kwarg] = 'path_list'
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
@@ -726,34 +725,35 @@ class PDBDataBuffer():
                                        (self_.kwargs[i] \
                                         for i in self_.indices[nargs:]))
             def calcargs(self_):
-                # This whole method could be redone as a list comprehension.
-                # Future self: I dare you to rewrite it as one.
-                retlist = []
-                for arg, arg_type in zip(self_.args, self_.args_types):
-                    if arg_type == 'stream':
-                        retlist.append(arg.get_stream())
-                    elif arg_type == 'path':
-                        retlist.append(arg.path)
-                    else:
-                        retlist.append(arg)
-                return retlist
+                # F U N C T I O N A L
+                return [{'stream':      arg.get_stream(),
+                         'path':        arg.path,
+                         'stream_list': [f.get_stream() for f in arg],
+                         'path_list':   [f.path for f in arg],
+                        }.get(arg_type, arg) \
+                        for arg, arg_type in zip(self_.args, self_.args_types)]
             def calckwargs(self_):
-                retdict = {}
-                for kwarg, kwarg_value in self_.kwargs.items():
-                    if self_.kwargs_types[kwarg] == 'stream':
-                        retdict[kwarg] = kwarg_value.get_stream()
-                    elif self_.kwargs_types[kwarg] == 'path':
-                        retdict[kwarg] = kwarg_value.path
-                    else:
-                        retdict[kwarg] = kwarg_value
-                return retdict
+                # P R O G R A M M I N G
+                return {kwarg:{'stream':      value.get_stream(),
+                               'path':        value.path,
+                               'stream_list': [f.get_stream() for f in value],
+                               'path_list':   [f.path for f in value],
+                              }.get(self_.kwargs_types[kwarg], arg) \
+                        for kwarg, value, in self_.kwargs.items()}
             def update_paths(self_):
                 for arg, arg_type in zip(self_.args, self_.args_types):
                     if arg_type in ('stream', 'path'):
                         arg.update_file_paths_dict()
+                    elif arg_type in ('stream_list', 'path_list'):
+                        for f in arg:
+                            f.update_file_paths_dict()
                 for kwarg, kwarg_value in self_.kwargs.items():
-                    if self_.kwargs_types[kwarg] in ('stream', 'path'):
+                    kwarg_type = self_.kwargs_types[kwarg]
+                    if kwarg_type in ('stream', 'path'):
                         kwarg_value.update_file_paths_dict()
+                    elif kwarg_type in ('stream_list', 'path_list'):
+                        for f in kwarg_value:
+                            f.update_file_paths_dict()
         return ProtoArgs()
 
     def encapsulate_file(self, path):
@@ -794,7 +794,7 @@ class PDBDataBuffer():
 
     ## Calculating Rosetta stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
-    # is just the same thing but with all the buffer/caching magic attached, 
+    # is just the same thing but with all the buffer/caching magic attached,
     # and with stream args replaced with path args. It also creates a
     # gather_<whatever>, which outwardly looks like get_<whatever> operating on
     # a list instead of a single filename, but is actually concurrently
@@ -804,10 +804,11 @@ class PDBDataBuffer():
     #   - positional args, with at least one arg taking a PDB path or stream
     #   - params arg
     #   - other keyword args
-    # All values of all args need to either have a consistent string
-    # representation in Python, or need to end in "stream" and take a
-    # stream-like object, or need to end in "path" and take a string that is a
-    # path to a file.
+    # All values of all args need to be one of the following:
+    #   - ending with "stream" and taking a stream
+    #   - ending with "path" and taking a path to a file
+    #   - ending with "stream_list" and taking a list of streams
+    #   - ending with "path_list" and taking a list of paths to files
     @uses_pr_env
     @needs_pr_scorefxn
     def calculate_score(self, stream, params=None):
