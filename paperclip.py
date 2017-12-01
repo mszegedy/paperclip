@@ -666,14 +666,20 @@ class PDBDataBuffer():
                     positargs = argspec.args[1:]
                 for i, arg in enumerate(positargs):
                     self_.indices.append(i)
-                    if arg.endswith('stream') or arg.endswith('path'):
+                    if arg.endswith('stream'):
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('stream')
-                    elif arg.endswith('stream_list') or \
-                         arg.endswith('path_list'):
+                    elif arg.endswith('path'):
+                        self_.args.append(handle_path_arg(args[i]))
+                        self_.args_types.append('path')
+                    elif arg.endswith('stream_list'):
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('stream_list')
+                    elif arg.endswith('path_list'):
+                        self_.args.append([handle_path_arg(path) \
+                                           for path in args[i]])
+                        self_.args_types.append('path_list')
                     else:
                         self_.args.append(args[i])
                         self_.args_types.append('other')
@@ -688,14 +694,20 @@ class PDBDataBuffer():
                              if kwarg in kwargs.keys())
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
-                    if kwarg.endswith('stream') or kwarg.endswith('path'):
+                    if kwarg.endswith('stream'):
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'stream'
-                    elif kwarg.endswith('stream_list') or \
-                         kwarg.endswith('path_list'):
+                    elif kwarg.endswith('path'):
+                        self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
+                        self_.kwargs_types[kwarg] = 'path'
+                    elif kwarg.endswith('stream_list'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'stream_list'
+                    elif kwarg.endswith('path_list'):
+                        self_.kwargs[kwarg] = [handle_path_arg(path) \
+                                               for path in kwargs[kwarg]]
+                        self_.kwargs_types[kwarg] = 'path_list'
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
