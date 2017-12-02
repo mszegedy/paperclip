@@ -20,7 +20,7 @@ import csv
 import hashlib
 import os, io, time, argparse
 import subprocess
-import json
+import json, base64
 import cmd, shlex
 import sys, traceback, inspect
 import ast
@@ -202,26 +202,40 @@ def make_PDBDataBuffer_get(data_name):
     # it should be a function that takes at least one PDB file path as
     # a positional argument, a params list as a keyword argument, and a
     # bunch of hashable arguments as the rest of its arguments.
-    def get(self_, *args, params=None, **kwargs):
+    def get(self_, *args, **kwargs):
         proto_args = self_.proto_args(data_name, args, kwargs)
         for path in proto_args.paths:
             self_.retrieve_data_from_cache(os.path.dirname(path))
         file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
                               .setdefault(data_name, {})
         try:
-            return file_data[proto_args.accessor_string]
+            if hasattr(self_, 'import_'+data_name):
+                return getattr(self_, 'import_'+data_name) \
+                              (file_data[proto_args.accessor_string])
+            else:
+                return file_data[proto_args.accessor_string]
         except KeyError:
             # construct new args
             if self_.calculatingp:
-                file_data[proto_args.accessor_string] = \
-                    getattr(self_, 'calculate_'+data_name) \
-                        (*proto_args.calcargs,
-                         params=params,
-                         **proto_args.calckwargs)
+                if hasattr(self_, 'export_'+data_name):
+                    file_data[proto_args.accessor_string] = \
+                        getattr(self_, 'export_'+data_name) \
+                               (getattr(self_, 'calculate_'+data_name) \
+                                       (*proto_args.calcargs,
+                                        **proto_args.calckwargs))
+                else:
+                    file_data[proto_args.accessor_string] = \
+                        getattr(self_, 'calculate_'+data_name) \
+                               (*proto_args.calcargs,
+                                **proto_args.calckwargs)
                 self_.changed_dirs.update(os.path.dirname(path) \
-                                          for path in proto_args.paths)
+                                        for path in proto_args.paths)
                 self_.update_caches()
-                return file_data[proto_args.accessor_string]
+                if hasattr(self_, 'import_'+data_name):
+                    return getattr(self_, 'import_'+data_name) \
+                                  (file_data[proto_args.accessor_string])
+                else:
+                    return file_data[proto_args.accessor_string]
             else:
                 raise KeyError('That file\'s not in the cache.')
     get.__name__ = 'get_'+data_name
@@ -232,16 +246,17 @@ def make_PDBDataBuffer_get(data_name):
 def make_PDBDataBuffer_gather(data_name):
     '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
     on a list of values for an argument,  instead of a single value.'''
-    def gather(self_, *args, params=None, argi=0, **kwargs):
+    def gather(self_, *args, argi=0, **kwargs):
         # New keyword argument argi: which argument is to be made into a list.
-        # If it is a number, then it corresponds to a positional argument
-        # (params included in the numbering, but self not). If it is a string,
-        # then it corresponds to /any/ argument with the name of the string
-        # (which could be a required positional argument). It may also be a
-        # list of such indices, to listify for all of those.
+        # If it is a number, then it corresponds to a positional argument (self
+        # not included in the numbering). If it is a string, then it
+        # corresponds to /any/ argument with the name of the string (which
+        # could be a required positional argument). It may also be a list of
+        # such indices, to listify for all of those.
         def unpack_args():
-            '''A generator that will come up with a tuple of (args, params,
-            ukwargs) until all the requested combinations have been done.'''
+            '''A generator that will come up with a tuple of (args, ukwargs) until all the
+            requested combinations have been done.
+            '''
             # (also I have a strong feeling this could all be rewritten more
             #  concisely, but I have no idea how to make it happen)
             std_argi = copy.deepcopy(argi)
@@ -259,11 +274,9 @@ def make_PDBDataBuffer_gather(data_name):
                 *(((kwargs[argspec.args[i+1]] if i >= len(argspec.args) - \
                                                       lendefaults - 1 \
                     else args[i]) if isinstance(i, int) \
-                   else (params if i == 'params' \
-                         else kwargs[i]) if isinstance(i, str) else None) \
+                   else kwargs[i] if isinstance(i, str) else None) \
                   for i in std_argi)):
                 newargs   = list(copy.copy(args))
-                newparams = copy.copy(params)
                 newkwargs = copy.copy(kwargs)
                 combo_gen = (value for value in combo)
                 for i in std_argi:
@@ -275,17 +288,14 @@ def make_PDBDataBuffer_gather(data_name):
                         else:
                             newargs[i] = next(combo_gen)
                     elif isinstance(i, str):
-                        if i == 'params':
-                            newparams = next(combo_gen)
-                        else:
-                            newkwargs[i] = next(combo_gen)
-                yield (newargs, newparams, newkwargs)
+                        newkwargs[i] = next(combo_gen)
+                yield (newargs, newkwargs)
         if MPISIZE == 1 or not self_.calculatingp:
             result = []
-            for uargs, uparams, ukwargs in unpack_args():
+            for uargs, ukwargs in unpack_args():
                 try:
                     result.append(getattr(self_, 'get_'+data_name) \
-                                         (*uargs, params=uparams, **ukwargs))
+                                         (*uargs, **ukwargs))
                 except KeyError:
                     pass
             return result
@@ -310,15 +320,19 @@ def make_PDBDataBuffer_gather(data_name):
                     DEBUG_OUT('accessor string: ' + proto_args.accessor_string)
                     proto_args.file_paths = self_.file_paths
                     proto_args.update_paths()
-                    self_.data.setdefault(proto_args.pdbhash, {}) \
-                              .setdefault(data_name, {}) \
-                              [proto_args.accessor_string] = result_data
+                    file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
+                                          .setdefault(data_name, {})
+                    if hasattr(self_, 'export_'+data_name):
+                        file_data[proto_args.accessor_string] = \
+                            getattr(self_, 'export_'+data_name)(result_data)
+                    else:
+                        file_data[proto_args.accessor_string] = result_data
                     file_indices_list.append([proto_args.pdbhash,
                                               data_name,
                                               proto_args.accessor_string])
                     DEBUG_OUT('just saved result for ' + proto_args.pdbpath)
                 ## main loop
-                for uargs, uparams, ukwargs in unpack_args():
+                for uargs, ukwargs in unpack_args():
                     proto_args = self_.proto_args(data_name, uargs, ukwargs)
                     DEBUG_OUT('accessor string from next item: ' + proto_args.accessor_string)
                     # lazy cache retrieval!
@@ -334,7 +348,7 @@ def make_PDBDataBuffer_gather(data_name):
                         proto_args.file_paths = None
                         DEBUG_OUT('assigning '+proto_args.pdbpath+' to ' + \
                                   str(result_source))
-                        MPICOMM.send([proto_args, uparams],
+                        MPICOMM.send(proto_args,
                                      dest=result_source, tag=WORK_TAG)
                         DEBUG_OUT('assignment sent')
                         if result_tag == DONE_TAG:
@@ -362,12 +376,13 @@ def make_PDBDataBuffer_gather(data_name):
                     package = MPICOMM.recv(source=0, tag=WORK_TAG)
                     if package == QUIT_GATHERING_SIGNAL:
                         break
-                    proto_args, params = package
+                    proto_args = package
+                    sys.stdout = STDOUT
+                    DEBUG_OUT(proto_args.calckwargs)
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
-                            (*proto_args.calcargs,
-                             params=params,
-                             **proto_args.calckwargs)
+                               (*proto_args.calcargs,
+                                **proto_args.calckwargs)
                     MPICOMM.send(copy.copy([proto_args,
                                             result_data]),
                                  dest=0, tag=DONE_TAG)
@@ -377,10 +392,15 @@ def make_PDBDataBuffer_gather(data_name):
             self_.cache_paths = MPICOMM.bcast(self_.cache_paths, root=0)
             file_indices_list = MPICOMM.bcast(file_indices_list, root=0)
             # All threads should be on the same page at this point.
-            retlist = []
-            for indices in file_indices_list:
-                retlist.append(self_.data[indices[0]][indices[1]][indices[2]])
-            return retlist
+            if hasattr(self_, 'import_'+data_name):
+                return [getattr(self_, 'import_'+data_name) \
+                               (self_.data[indices[0]] \
+                                          [indices[1]] \
+                                          [indices[2]]) \
+                        for indices in file_indices_list]
+            else:
+                return [self_.data[indices[0]][indices[1]][indices[2]] \
+                        for indices in file_indices_list]
     gather.__name__ = 'gather_'+data_name
     gather.__doc__  = 'Call calculate_'+data_name+ \
                       '() on a list of file paths with concurrency magic.'
@@ -453,10 +473,11 @@ class PDBDataBuffer():
     The ability to get a particular type of data is added to the buffer by
     defining a calculate_ method. Corresponding get_ and gather_ methods are
     created dynamically at initialization, which add caching to the calculate_
-    method, and take a filename or list of filenames instead of a file contents
-    string. For this reason, all calculate_ methods should take a contents
-    string as their first argument, and also a params keyword argument for the
-    file params.
+    method, and in the case of gather_, concurrently operate on lists given for
+    arguments that normally don't take them. Because PDB hashes are used as the
+    top-level keys in the data dict, each calculate_ method should take at
+    least one PDB, either as a stream or a path. See the comment above the
+    calculate_ methods for more details.
 
     The internal settings calculatingp and plottingp work like this:
 
@@ -488,6 +509,7 @@ class PDBDataBuffer():
                     'hash'  : contents_hash } }
     self.cache_paths:
     { cache_file_dir_path : mtime_at_last_access }
+
     '''
     ## Core functionality
     def __init__(self):
@@ -643,6 +665,7 @@ class PDBDataBuffer():
                 self_.accessor_string = ''
                 calcfxn = getattr(self, 'calculate_'+data_name)
                 argspec = inspect.getfullargspec(calcfxn)
+                DEBUG_OUT('argspec: ', argspec)
                 accessor_list = []
                 def check_if_first_path_arg(encapsulated):
                     if len(self_.paths) == 1:
@@ -684,14 +707,15 @@ class PDBDataBuffer():
                         self_.args.append(args[i])
                         self_.args_types.append('other')
                         accessor_list.append(args[i])
-                # +1 in the slice so that we skip over params:
-                if lendefaults > 1:
-                    namedargs = (argspec.args[-lendefaults+1:] + \
+                if lendefaults > 0:
+                    namedargs = (argspec.args[-lendefaults:] + \
                                  argspec.kwonlyargs)
                 else:
                     namedargs =  argspec.kwonlyargs
                 namedargs = (kwarg for kwarg in namedargs \
                              if kwarg in kwargs.keys())
+                DEBUG_OUT('kwargs: ', kwargs)
+                DEBUG_OUT('namedargs: ', namedargs)
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
@@ -704,14 +728,15 @@ class PDBDataBuffer():
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'stream_list'
-                    elif kwarg.endswith('path_list'):
+                    elif kwarg.endswith('path_list') or kwarg == 'params':
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'path_list'
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
-                        accessor_list.append(kwargs[kwarg])
+                        if kwarg != '_dump_json_p':
+                            accessor_list.append(kwargs[kwarg])
                 if hasattr(calcfxn, 'uses_pr_env_p'):
                     PYROSETTA_ENV.init()
                     accessor_list.append(PYROSETTA_ENV.hash)
@@ -738,6 +763,7 @@ class PDBDataBuffer():
             @property
             def calckwargs(self_):
                 # P R O G R A M M I N G
+                DEBUG_OUT(self_.kwargs)
                 return {kwarg:{'stream':      lambda: value.stream,
                                'path':        lambda: value.path,
                                'stream_list': lambda: [f.stream for f in value],
@@ -803,17 +829,19 @@ class PDBDataBuffer():
     # and with stream args replaced with path args. It also creates a
     # gather_<whatever>, which outwardly looks like get_<whatever> operating on
     # a list instead of a single filename, but is actually concurrently
-    # controlled if there are multiple processors available.
-    # These functions should take their args in the following format:
-    #   - self
-    #   - positional args, with at least one arg taking a PDB path or stream
-    #   - params arg
-    #   - other keyword args
-    # All values of all args need to be one of the following:
+    # controlled if there are multiple processors available. All values of all
+    # args need to be one of the following:
     #   - ending with "stream" and taking a stream
     #   - ending with "path" and taking a path to a file
     #   - ending with "stream_list" and taking a list of streams
     #   - ending with "path_list" and taking a list of paths to files
+    #   - not ending with any of those and taking something with a consistent
+    #     string representation in Python
+    # At least one arg needs to take a PDB file in some acceptable form.
+    #
+    # It is possible to write import_ and export_ methods to convert the
+    # results of a calculate_ method from and to a JSON-storeable format. These
+    # must take only one argument each (besides self), and must come in pairs.
     @uses_pr_env
     @needs_pr_scorefxn
     def calculate_score(self, stream, params=None):
@@ -829,6 +857,8 @@ class PDBDataBuffer():
                        params=None):
         '''Calculates the RMSD of two proteins from each other and stores
         it, without assuming commutativity.'''
+        sys.stdout = STDOUT
+        DEBUG_OUT(params)
         pose_lhs = pose_from_stream(lhs_stream, params=params)
         pose_rhs = pose_from_stream(rhs_stream, params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
@@ -852,8 +882,20 @@ class PDBDataBuffer():
                                                  i, j,
                                                  coarsep=coarsep,
                                                  bound=bound)))
-        return result
-
+        return np.array(result)
+    def export_neighbors(self, decoded):
+        # Final form is:
+        # [bunch of bits as Base-85 string,
+        #  side length of square matrix]
+        return [base64.b85encode(np.packbits(decoded).tobytes()).decode(),
+                decoded.shape[0]]
+    def import_neighbors(self, encoded):
+        encoded, size = encoded 
+        return np.reshape(np.unpackbits(
+                              np.frombuffer(
+                                  base64.b85decode(encoded.encode()),
+                                  np.uint8))[:size**2],
+                          [size, size])
 ### Main class
 
 class OurCmdLine(cmd.Cmd):
@@ -1723,9 +1765,9 @@ everything.
                   'number of pdbs. Try "help plot_neighbors_comparison_bar".')
             return
         pdbmatrices = [np.array(result) \
-                       for result in \
-                           self.data_buffer.gather_neighbors(parsed_args.pdbs,
-                                                             params=params)]
+                       for result in self.data_buffer.gather_neighbors(
+                                         parsed_args.pdbs,
+                                         params=params)]
         # parse bounds
         scorelowbound = None
         scoreupbound  = 0
