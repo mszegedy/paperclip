@@ -712,7 +712,7 @@ class PDBDataBuffer():
                                  argspec.kwonlyargs)
                 else:
                     namedargs =  argspec.kwonlyargs
-                namedargs = tuple(kwarg for kwarg in namedargs \
+                namedargs = (kwarg for kwarg in namedargs \
                              if kwarg in kwargs.keys())
                 DEBUG_OUT('kwargs: ', kwargs)
                 DEBUG_OUT('namedargs: ', namedargs)
