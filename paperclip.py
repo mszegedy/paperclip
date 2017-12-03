@@ -16,6 +16,7 @@ interest. Most plotting commands are based on Matlab commands.
 import re
 import types, copy
 import itertools, functools, operator
+import zlib
 import csv
 import hashlib
 import os, io, time, argparse
@@ -26,7 +27,7 @@ import sys, traceback, inspect
 import ast
 import fcntl
 ## Other stuff
-import decorator
+from decorator import decorator
 import timeout_decorator
 from mpi4py import MPI
 import dill
@@ -60,14 +61,14 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
 
 ### Decorators
 
-@decorator.decorator
+@decorator
 def needs_pr_init(f, *args, **kwargs):
     '''Makes sure PyRosetta gets initialized before f is called.'''
     global PYROSETTA_ENV
     PYROSETTA_ENV.init()
     return f(*args, **kwargs)
 
-@decorator.decorator
+@decorator
 def needs_pr_scorefxn(f, *args, **kwargs):
     '''Makes sure the scorefxn exists before f is called. (In order for the
     scorefxn to exist, pr.init() needs to have been called, so @needs_pr_init
@@ -173,25 +174,6 @@ def process_params(params):
                 for param in params]
     else:
         return None
-
-## Rosetta stuff
-
-@needs_pr_init
-def pose_from_contents(contents, params=None):
-    '''Returns a Pose of a given pdb file contents string.'''
-    pose = None
-    if params:
-        pose = mpre.pose_from_pdbstring_with_params(contents, params)
-    else:
-        pose = pr.Pose()
-        pr.rosetta.core.import_pose.pose_from_pdbstring(pose, contents)
-    return pose
-@needs_pr_init
-def pose_from_stream(stream, params=None):
-    '''Returns a Pose of a given stream pointing at the contents of a
-    PDB.'''
-    # not gonna bother rewinding stream
-    return pose_from_contents(stream.read(), params)
 
 ## PDBDataBuffer accessor makers
 
@@ -315,14 +297,13 @@ def make_PDBDataBuffer_gather(data_name):
                                          status=MPISTATUS),
                             MPISTATUS.Get_source(),
                             MPISTATUS.Get_tag())
-                def save_result(proto_args, result_data):
+                def save_result(proto_args, result_data, exportp=True):
                     DEBUG_OUT('about to save result for ' + proto_args.pdbpath)
-                    DEBUG_OUT('accessor string: ' + proto_args.accessor_string)
                     proto_args.file_paths = self_.file_paths
                     proto_args.update_paths()
                     file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
                                           .setdefault(data_name, {})
-                    if hasattr(self_, 'export_'+data_name):
+                    if hasattr(self_, 'export_'+data_name) and exportp:
                         file_data[proto_args.accessor_string] = \
                             getattr(self_, 'export_'+data_name)(result_data)
                     else:
@@ -342,7 +323,8 @@ def make_PDBDataBuffer_gather(data_name):
                                           .setdefault(data_name, {})
                     try:
                         save_result(proto_args,
-                                    file_data[proto_args.accessor_string])
+                                    file_data[proto_args.accessor_string],
+                                    exportp=False)
                     except KeyError:
                         result, result_source, result_tag = recv_result()
                         proto_args.file_paths = None
@@ -377,8 +359,6 @@ def make_PDBDataBuffer_gather(data_name):
                     if package == QUIT_GATHERING_SIGNAL:
                         break
                     proto_args = package
-                    sys.stdout = STDOUT
-                    DEBUG_OUT(proto_args.calckwargs)
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
                                (*proto_args.calcargs,
@@ -551,7 +531,6 @@ class PDBDataBuffer():
                     cache_fd.seek(pos)
                 else:
                     try:
-                        #DEBUG_OUT('opening and retrieving cache at'+cache_path)
                         with open(cache_path, 'r') as cache_file:
                             file_contents = cache_file.read()
                             DEBUG_OUT('cache at '+cache_file.name+' read')
@@ -568,17 +547,13 @@ class PDBDataBuffer():
                     DEBUG_OUT('cache retrieved')
                     diskdata, disk_file_paths = retrieved
                     for content_key, content in diskdata.items():
-                        #DEBUG_OUT('reading data for content key '+content_key)
                         for data_name, data_keys in content.items():
-                            #DEBUG_OUT('  reading data type '+data_name)
                             for data_key, data in data_keys.items():
-                                #DEBUG_OUT('    reading data key '+str(data_key))
                                 self.data.setdefault(content_key,{})
                                 self.data[content_key].setdefault(data_name,{})
-                                # str(data_key) for backwards compatibility
                                 self.data[content_key] \
                                          [data_name] \
-                                         [str(data_key)] = data
+                                         [data_key] = data
                     for name, info_pair in disk_file_paths.items():
                         DEBUG_OUT('saving info for '+name)
                         path = os.path.join(absdirpath, name)
@@ -630,7 +605,7 @@ class PDBDataBuffer():
                     except KeyError:
                         pass
                 #DEBUG_OUT('  updated cache with data for file at ', pdb_path)
-            cache_file.write(json.dumps([dir_data, dir_file_paths]))
+            cache_file.write(json.dumps([dir_data, dir_file_paths], indent=4))
             fcntl.flock(cache_file, fcntl.LOCK_UN)
             cache_file.close()
             DEBUG_OUT('wrote cache file at ', cache_path)
@@ -665,7 +640,6 @@ class PDBDataBuffer():
                 self_.accessor_string = ''
                 calcfxn = getattr(self, 'calculate_'+data_name)
                 argspec = inspect.getfullargspec(calcfxn)
-                DEBUG_OUT('argspec: ', argspec)
                 accessor_list = []
                 def check_if_first_path_arg(encapsulated):
                     if len(self_.paths) == 1:
@@ -714,8 +688,6 @@ class PDBDataBuffer():
                     namedargs =  argspec.kwonlyargs
                 namedargs = (kwarg for kwarg in namedargs \
                              if kwarg in kwargs.keys())
-                DEBUG_OUT('kwargs: ', kwargs)
-                DEBUG_OUT('namedargs: ', namedargs)
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
                     if kwarg.endswith('stream'):
@@ -735,8 +707,7 @@ class PDBDataBuffer():
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
-                        if kwarg != '_dump_json_p':
-                            accessor_list.append(kwargs[kwarg])
+                        accessor_list.append(kwargs[kwarg])
                 if hasattr(calcfxn, 'uses_pr_env_p'):
                     PYROSETTA_ENV.init()
                     accessor_list.append(PYROSETTA_ENV.hash)
@@ -763,7 +734,6 @@ class PDBDataBuffer():
             @property
             def calckwargs(self_):
                 # P R O G R A M M I N G
-                DEBUG_OUT(self_.kwargs)
                 return {kwarg:{'stream':      lambda: value.stream,
                                'path':        lambda: value.path,
                                'stream_list': lambda: [f.stream for f in value],
@@ -844,30 +814,30 @@ class PDBDataBuffer():
     # must take only one argument each (besides self), and must come in pairs.
     @uses_pr_env
     @needs_pr_scorefxn
-    def calculate_score(self, stream, params=None):
+    def calculate_score(self, stream, params=None, cst_path=None):
         '''Calculates the score of a protein from a stream of its PDB file.
         scorefxn_hash is not used inside the calculation, but is used for
         indexing into the buffer.
         '''
         global PYROSETTA_ENV
-        pose = pose_from_stream(stream, params)
+        pose = mpre.pose_from_pdbstring(stream.read(), params=params)
+        if cst_path is not None:
+            mpre.add_constraints_from_file(pose, cst_path)
         return PYROSETTA_ENV.scorefxn(pose)
     @needs_pr_init
     def calculate_rmsd(self, lhs_stream, rhs_stream, rmsd_type,
                        params=None):
         '''Calculates the RMSD of two proteins from each other and stores
         it, without assuming commutativity.'''
-        sys.stdout = STDOUT
-        DEBUG_OUT(params)
-        pose_lhs = pose_from_stream(lhs_stream, params=params)
-        pose_rhs = pose_from_stream(rhs_stream, params=params)
+        pose_lhs = mpre.pose_from_pdbstring(lhs_stream.read(), params=params)
+        pose_rhs = mpre.pose_from_pdbstring(rhs_stream.read(), params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
     @needs_pr_init
     def calculate_neighbors(self, stream, params=None, coarsep=False,
                             bound=None):
         '''Calculates the residue neighborhood matrix of a protein based on the
         provided contents of its PDB file.'''
-        pose = pose_from_stream(stream, params=params)
+        pose = mpre.pose_from_pdbstring(stream.read(), params=params)
         result = []
         n_residues = pose.size()
         for i in range(1,n_residues+1):
@@ -887,13 +857,16 @@ class PDBDataBuffer():
         # Final form is:
         # [bunch of bits as Base-85 string,
         #  side length of square matrix]
-        return [base64.b85encode(np.packbits(decoded).tobytes()).decode(),
+        return [base64.b85encode(
+                    # this 7 is the compression level -----------v
+                    zlib.compress(np.packbits(decoded).tobytes(),7)).decode(),
                 decoded.shape[0]]
     def import_neighbors(self, encoded):
         encoded, size = encoded 
         return np.reshape(np.unpackbits(
                               np.frombuffer(
-                                  base64.b85decode(encoded.encode()),
+                                  zlib.decompress(
+                                      base64.b85decode(encoded.encode())),
                                   np.uint8))[:size**2],
                           [size, size])
 ### Main class
@@ -907,6 +880,7 @@ class OurCmdLine(cmd.Cmd):
     cmdfile = None
     settings = {'calculation': True,
                 'caching': True,
+                'debug': DEBUG,
                 'plotting': MPIRANK == 0,
                 'continuous_mode': False}
     timelimit = 0
@@ -971,6 +945,13 @@ class OurCmdLine(cmd.Cmd):
         '''For completion; gets index of current positional argument (returns 1 for
         first arg, 2 for second arg, etc.).'''
         return len(line.split()) - (text != '')
+    def split_cst_path(self, path):
+        '''Splits off a colon-separated cst file from the end of a path.'''
+        split = path.split(':')
+        if len(split) > 1:
+            return (':'.join(split[:-1]), split[-1])
+        else:
+            return (path, None)
 
     ## Recording and playing back commands
     def do_record(self, arg):
@@ -1071,6 +1052,7 @@ Available settings are:
                 print('That\'s not a valid setting name. Try '
                       '\'get_settings\'.')
                 return
+        DEBUG                         = self.settings['debug']
         self.data_buffer.calculatingp = self.settings['calculation']
         self.data_buffer.cachingp     = self.settings['caching']
     def complete_set(self, text, line, begidx, endidx):
@@ -1425,7 +1407,10 @@ everything.
                         'for a directory of PDBs to the text buffer.')
         parser.add_argument('in_dir',
                             action='store',
-                            help='The directory to plot for.')
+                            help='The directory to plot for. You may specify a'
+                                 ' constraints file for its scoring by adding '
+                                 'a colon followed by the path to the file to '
+                                 'the end of this path.')
         parser.add_argument('in_file',
                             action='store',
                             help='The PDB to compare with for RMSD.')
@@ -1456,22 +1441,23 @@ everything.
             parsed_args = parser.parse_args(arg.split())
         except SystemExit:
             return
-        filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        in_dir, cst_path = self.split_cst_path(parsed_args.in_dir)
+        filenames_in_in_dir = os.listdir(in_dir)
         filenames_in_in_dir = [filename \
                                for filename in filenames_in_in_dir \
                                if filename.endswith('.pdb')]
         params = process_params(parsed_args.params)
         data = zip(filenames_in_in_dir,
                    self.data_buffer.gather_rmsd(
-                       (os.path.join(parsed_args.in_dir, filename) \
+                       (os.path.join(in_dir, filename) \
                         for filename in filenames_in_in_dir),
                        parsed_args.in_file,
                        'all_atom_rmsd',
                        params=params),
                    self.data_buffer.gather_score(
-                       (os.path.join(parsed_args.in_dir, filename) \
+                       (os.path.join(in_dir, filename) \
                         for filename in filenames_in_in_dir),
-                       params=params))
+                       params=params, cst_path=cst_path))
         # sorting criterion
         criterion = None
         if parsed_args.sorting.lower() == 'rmsddec':
@@ -1557,20 +1543,21 @@ everything.
             parsed_args = parser.parse_args(arg.split())
         except SystemExit:
             return
-        filenames_in_in_dir = os.listdir(parsed_args.in_dir)
+        in_dir, cst_path = self.split_cst_path(parsed_args.in_dir)
+        filenames_in_in_dir = os.listdir(in_dir)
         params = process_params(parsed_args.params)
         data = set(zip(self.data_buffer.gather_rmsd(
-                           (os.path.join(parsed_args.in_dir, filename) \
+                           (os.path.join(in_dir, filename) \
                             for filename in filenames_in_in_dir \
                             if filename.endswith('.pdb')),
                            parsed_args.in_file,
                            'all_atom_rmsd',
                            params=params),
                        self.data_buffer.gather_score(
-                           (os.path.join(parsed_args.in_dir, filename) \
+                           (os.path.join(in_dir, filename) \
                             for filename in filenames_in_in_dir \
                             if filename.endswith('.pdb')),
-                           params=params)))
+                           params=params, cst_path=cst_path)))
         rmsdlowbound  = None
         rmsdupbound   = None
         scorelowbound = None
@@ -1712,7 +1699,9 @@ everything.
                                  'on the chart. So if you were comparing dirs '
                                  'for PDB1 and PDB2, you\'d list the dirs in '
                                  'the order "PDB1-dir1 PDB2-dir1 PDB1-dir2 '
-                                 'PDB2-dir2."')
+                                 'PDB2-dir2." You may additionally specify a '
+                                 'constraints file for each dir by joining it '
+                                 'to the end of the path with a colon.')
         parser.add_argument('--pdbs',
                             dest='pdbs',
                             action='store',
@@ -1792,15 +1781,19 @@ everything.
             errors = []
         else:
             errors = None
+        dirs_and_csts = [self.split_cst_path(d) for d in parsed_args.dirs]
         try:
-            for index, pdbdir in enumerate(parsed_args.dirs):
+            for index, pdbdir_and_cst in enumerate(dirs_and_csts):
+                pdbdir, cst_path = dirs_and_csts
                 prototype = pdbmatrices[index % npdbs]
                 filenames = os.listdir(pdbdir)
-                scores = self.data_buffer.gather_score(
-                             (os.path.join(pdbdir, filename) \
-                              for filename in filenames \
-                              if filename.endswith('.pdb')),
-                             params=params)
+                scores = None
+                if scorelowbound is not None and scoreupbound is not None:
+                    scores = self.data_buffer.gather_score(
+                                 (os.path.join(pdbdir, filename) \
+                                  for filename in filenames \
+                                  if filename.endswith('.pdb')),
+                                 params=params, cst_path=cst_path)
                 results = [(np.array(result) - prototype)**2 \
                            for result in \
                                self.data_buffer.gather_neighbors(
