@@ -1791,7 +1791,7 @@ everything.
                 prototype = pdbmatrices[index % npdbs]
                 filenames = os.listdir(pdbdir)
                 scores = None
-                if scorelowbound is not None and scoreupbound is not None:
+                if scorelowbound is not None or scoreupbound is not None:
                     scores = self.data_buffer.gather_score(
                                  (os.path.join(pdbdir, filename) \
                                   for filename in filenames \
