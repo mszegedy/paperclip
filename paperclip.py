@@ -663,17 +663,17 @@ class PDBDataBuffer():
                     positargs = argspec.args[1:]
                 for i, arg in enumerate(positargs):
                     self_.indices.append(i)
-                    if arg.endswith('stream'):
+                    if arg.endswith('stream') and args[i] is not None:
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('stream')
-                    elif arg.endswith('path'):
+                    elif arg.endswith('path') and args[i] is not None:
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('path')
-                    elif arg.endswith('stream_list'):
+                    elif arg.endswith('stream_list') and args[i] is not None:
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('stream_list')
-                    elif arg.endswith('path_list'):
+                    elif arg.endswith('path_list') and args[i] is not None:
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('path_list')
@@ -690,17 +690,19 @@ class PDBDataBuffer():
                              if kwarg in kwargs.keys())
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
-                    if kwarg.endswith('stream'):
+                    if kwarg.endswith('stream') and kwargs[kwarg] is not None:
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'stream'
-                    elif kwarg.endswith('path'):
+                    elif kwarg.endswith('path') and kwargs[kwarg] is not None:
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'path'
-                    elif kwarg.endswith('stream_list'):
+                    elif kwarg.endswith('stream_list') and \
+                         kwargs[kwarg] is not None:
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'stream_list'
-                    elif kwarg.endswith('path_list') or kwarg == 'params':
+                    elif kwarg.endswith('path_list') or kwarg == 'params' and \
+                         kwargs[kwarg] is not None:
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'path_list'
@@ -725,20 +727,21 @@ class PDBDataBuffer():
             @property
             def calcargs(self_):
                 # F U N C T I O N A L
-                return [{'stream':      lambda: arg.stream,
-                         'path':        lambda: arg.path,
-                         'stream_list': lambda: [f.stream for f in arg],
-                         'path_list':   lambda: [f.path for f in arg],
-                        }.get(arg_type, lambda: arg)() \
+                return [{'stream':     lambda: arg.stream,
+                         'path':       lambda: arg.path,
+                         'stream_list':lambda: [f.stream for f in arg],
+                         'path_list':  lambda: [f.path for f in arg],
+                        }.get(arg_type,lambda: arg)() \
                         for arg, arg_type in zip(self_.args, self_.args_types)]
             @property
             def calckwargs(self_):
                 # P R O G R A M M I N G
-                return {kwarg:{'stream':      lambda: value.stream,
-                               'path':        lambda: value.path,
-                               'stream_list': lambda: [f.stream for f in value],
-                               'path_list':   lambda: [f.path for f in value],
-                              }.get(self_.kwargs_types[kwarg], lambda: arg)() \
+                return {kwarg:{'stream':     lambda: value.stream,
+                               'path':       lambda: value.path,
+                               'stream_list':lambda: [f.stream for f in value],
+                               'path_list':  lambda: [f.path for f in value],
+                              }.get(self_.kwargs_types[kwarg],
+                                    lambda: value)() \
                         for kwarg, value, in self_.kwargs.items()}
             def update_paths(self_):
                 for arg, arg_type in zip(self_.args, self_.args_types):
