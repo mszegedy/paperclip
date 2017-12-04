@@ -315,7 +315,6 @@ def make_PDBDataBuffer_gather(data_name):
                 ## main loop
                 for uargs, ukwargs in unpack_args():
                     proto_args = self_.proto_args(data_name, uargs, ukwargs)
-                    DEBUG_OUT('accessor string from next item: ' + proto_args.accessor_string)
                     # lazy cache retrieval!
                     for path in proto_args.paths:
                         self_.retrieve_data_from_cache(os.path.dirname(path))
@@ -663,20 +662,42 @@ class PDBDataBuffer():
                     positargs = argspec.args[1:]
                 for i, arg in enumerate(positargs):
                     self_.indices.append(i)
-                    if arg.endswith('stream') and args[i] is not None:
+                    if args[i] is None:
+                        self_.args.append(args[i])
+                        self_.args_types.append('other')
+                        accessor_list.append(args[i])
+                    elif arg.endswith('stream'):
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('stream')
-                    elif arg.endswith('path') and args[i] is not None:
+                    elif arg.endswith('path'):
                         self_.args.append(handle_path_arg(args[i]))
                         self_.args_types.append('path')
-                    elif arg.endswith('stream_list') and args[i] is not None:
+                    elif arg.endswith('stream_list'):
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('stream_list')
-                    elif arg.endswith('path_list') and args[i] is not None:
+                    elif arg.endswith('path_list'):
                         self_.args.append([handle_path_arg(path) \
                                            for path in args[i]])
                         self_.args_types.append('path_list')
+                    elif arg.endswith('stream_set'):
+                        self_.args.append([handle_path_arg(path) \
+                                           for path in sorted(list(args[i]))])
+                        if isinstance(args[i], set):
+                            self_.args_types.append('stream_setS')
+                        elif isinstance(args[i], tuple):
+                            self_.args_types.append('stream_setT')
+                        else:
+                            self_.args_types.append('stream_setL')
+                    elif arg.endswith('path_set'):
+                        self_.args.append([handle_path_arg(path) \
+                                           for path in sorted(list(args[i]))])
+                        if isinstance(args[i], set):
+                            self_.args_types.append('path_setS')
+                        elif isinstance(args[i], tuple):
+                            self_.args_types.append('path_setT')
+                        else:
+                            self_.args_types.append('path_setL')
                     else:
                         self_.args.append(args[i])
                         self_.args_types.append('other')
@@ -690,22 +711,44 @@ class PDBDataBuffer():
                              if kwarg in kwargs.keys())
                 for kwarg in namedargs:
                     self_.indices.append(kwarg)
-                    if kwarg.endswith('stream') and kwargs[kwarg] is not None:
+                    if kwargs[kwarg] is None:
+                        self_.kwargs[kwarg] = kwargs[kwarg]
+                        self_.kwargs_types[kwarg] = 'other'
+                        accessor_list.append(kwargs[kwarg])
+                    elif kwarg.endswith('stream'):
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'stream'
-                    elif kwarg.endswith('path') and kwargs[kwarg] is not None:
+                    elif kwarg.endswith('path'):
                         self_.kwargs[kwarg] = handle_path_arg(kwargs[kwarg])
                         self_.kwargs_types[kwarg] = 'path'
-                    elif kwarg.endswith('stream_list') and \
-                         kwargs[kwarg] is not None:
+                    elif kwarg.endswith('stream_list'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'stream_list'
-                    elif kwarg.endswith('path_list') or kwarg == 'params' and \
-                         kwargs[kwarg] is not None:
+                    elif kwarg.endswith('path_list'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path in kwargs[kwarg]]
                         self_.kwargs_types[kwarg] = 'path_list'
+                    elif kwarg.endswith('stream_set'):
+                        self_.kwargs[kwarg] = [handle_path_arg(path) \
+                                               for path \
+                                               in sorted(list(args[i]))]
+                        if isinstance(args[i], set):
+                            self_.kwargs_types[kwarg] = 'stream_setS'
+                        elif isinstance(args[i], tuple):
+                            self_.kwargs_types[kwarg] = 'stream_setT'
+                        else:
+                            self_.kwargs_types[kwarg] = 'stream_setL'
+                    elif (kwarg.endswith('path_set') or kwarg == 'params'):
+                        self_.kwargs[kwarg] = [handle_path_arg(path) \
+                                               for path \
+                                               in sorted(list(args[i]))]
+                        if isinstance(args[i], set):
+                            self_.kwargs_types[kwarg] = 'path_setS'
+                        elif isinstance(args[i], tuple):
+                            self_.kwargs_types[kwarg] = 'path_setT'
+                        else:
+                            self_.kwargs_types[kwarg] = 'path_setL'
                     else:
                         self_.kwargs[kwarg] = kwargs[kwarg]
                         self_.kwargs_types[kwarg] = 'other'
@@ -731,6 +774,14 @@ class PDBDataBuffer():
                          'path':       lambda: arg.path,
                          'stream_list':lambda: [f.stream for f in arg],
                          'path_list':  lambda: [f.path for f in arg],
+                         'stream_setS':lambda: set(f.stream for f in arg),
+                         'stream_setT':lambda: sorted(tuple(f.stream \
+                                                            for f in arg)),
+                         'stream_setL':lambda: sorted([f.stream for f in arg]),
+                         'path_setS':  lambda: set(f.path for f in arg),
+                         'path_setT':  lambda: sorted(tuple(f.path \
+                                                            for f in arg)),
+                         'path_setL':  lambda: sorted([f.path for f in arg]),
                         }.get(arg_type,lambda: arg)() \
                         for arg, arg_type in zip(self_.args, self_.args_types)]
             @property
@@ -740,6 +791,20 @@ class PDBDataBuffer():
                                'path':       lambda: value.path,
                                'stream_list':lambda: [f.stream for f in value],
                                'path_list':  lambda: [f.path for f in value],
+                               'stream_setS':lambda: set(f.stream \
+                                                         for f in value),
+                               'stream_setT':lambda: sorted(tuple(f.stream \
+                                                                  for f \
+                                                                  in value)),
+                               'stream_setL':lambda: sorted([f.stream \
+                                                             for f in value]),
+                               'path_setS':  lambda: set(f.path \
+                                                         for f in value),
+                               'path_setT':  lambda: sorted(tuple(f.path \
+                                                                  for f \
+                                                                  in value)),
+                               'path_setL':  lambda: sorted([f.path \
+                                                             for f in value]),
                               }.get(self_.kwargs_types[kwarg],
                                     lambda: value)() \
                         for kwarg, value, in self_.kwargs.items()}
@@ -808,8 +873,11 @@ class PDBDataBuffer():
     #   - ending with "path" and taking a path to a file
     #   - ending with "stream_list" and taking a list of streams
     #   - ending with "path_list" and taking a list of paths to files
+    #   - ending with "stream_set" and taking a set or unordered list of streams
+    #   - ending with "path_set" and taking a set or unordered list of paths
     #   - not ending with any of those and taking something with a consistent
     #     string representation in Python
+    #   - called "params" and taking an unordered list of paths
     # At least one arg needs to take a PDB file in some acceptable form.
     #
     # It is possible to write import_ and export_ methods to convert the
