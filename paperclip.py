@@ -732,7 +732,7 @@ class PDBDataBuffer():
                     elif kwarg.endswith('stream_set'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path \
-                                               in sorted(list(args[i]))]
+                                               in sorted(list(kwargs[kwarg]))]
                         if isinstance(args[i], set):
                             self_.kwargs_types[kwarg] = 'stream_setS'
                         elif isinstance(args[i], tuple):
@@ -742,7 +742,7 @@ class PDBDataBuffer():
                     elif (kwarg.endswith('path_set') or kwarg == 'params'):
                         self_.kwargs[kwarg] = [handle_path_arg(path) \
                                                for path \
-                                               in sorted(list(args[i]))]
+                                               in sorted(list(kwargs[kwarg]))]
                         if isinstance(args[i], set):
                             self_.kwargs_types[kwarg] = 'path_setS'
                         elif isinstance(args[i], tuple):
@@ -775,13 +775,11 @@ class PDBDataBuffer():
                          'stream_list':lambda: [f.stream for f in arg],
                          'path_list':  lambda: [f.path for f in arg],
                          'stream_setS':lambda: set(f.stream for f in arg),
-                         'stream_setT':lambda: sorted(tuple(f.stream \
-                                                            for f in arg)),
-                         'stream_setL':lambda: sorted([f.stream for f in arg]),
+                         'stream_setT':lambda: tuple(f.stream for f in arg),
+                         'stream_setL':lambda: [f.stream for f in arg],
                          'path_setS':  lambda: set(f.path for f in arg),
-                         'path_setT':  lambda: sorted(tuple(f.path \
-                                                            for f in arg)),
-                         'path_setL':  lambda: sorted([f.path for f in arg]),
+                         'path_setT':  lambda: tuple(f.path for f in arg),
+                         'path_setL':  lambda: [f.path for f in arg],
                         }.get(arg_type,lambda: arg)() \
                         for arg, arg_type in zip(self_.args, self_.args_types)]
             @property
@@ -793,18 +791,14 @@ class PDBDataBuffer():
                                'path_list':  lambda: [f.path for f in value],
                                'stream_setS':lambda: set(f.stream \
                                                          for f in value),
-                               'stream_setT':lambda: sorted(tuple(f.stream \
-                                                                  for f \
-                                                                  in value)),
-                               'stream_setL':lambda: sorted([f.stream \
-                                                             for f in value]),
+                               'stream_setT':lambda: tuple(f.stream \
+                                                           for f in value),
+                               'stream_setL':lambda: [f.stream for f in value],
                                'path_setS':  lambda: set(f.path \
                                                          for f in value),
-                               'path_setT':  lambda: sorted(tuple(f.path \
-                                                                  for f \
-                                                                  in value)),
-                               'path_setL':  lambda: sorted([f.path \
-                                                             for f in value]),
+                               'path_setT':  lambda: tuple(f.path \
+                                                           for f in value),
+                               'path_setL':  lambda: [f.path for f in value],
                               }.get(self_.kwargs_types[kwarg],
                                     lambda: value)() \
                         for kwarg, value, in self_.kwargs.items()}
@@ -812,14 +806,20 @@ class PDBDataBuffer():
                 for arg, arg_type in zip(self_.args, self_.args_types):
                     if arg_type in ('stream', 'path'):
                         arg.update_file_paths_dict()
-                    elif arg_type in ('stream_list', 'path_list'):
+                    elif arg_type in ('stream_list', 'path_list',
+                                      'stream_setS', 'stream_setT',
+                                      'stream_setL', 'path_setS',
+                                      'path_setT',   'path_setL'):
                         for f in arg:
                             f.update_file_paths_dict()
                 for kwarg, kwarg_value in self_.kwargs.items():
                     kwarg_type = self_.kwargs_types[kwarg]
                     if kwarg_type in ('stream', 'path'):
                         kwarg_value.update_file_paths_dict()
-                    elif kwarg_type in ('stream_list', 'path_list'):
+                    elif kwarg_type in ('stream_list', 'path_list',
+                                        'stream_setS', 'stream_setT',
+                                        'stream_setL', 'path_setS',
+                                        'path_setT',   'path_setL'):
                         for f in kwarg_value:
                             f.update_file_paths_dict()
         return ProtoArgs()
@@ -1509,7 +1509,7 @@ everything.
                                  'scoredec, or scoreinc.')
         self.do_table_dir_rmsd_vs_score.__func__.__doc__ = parser.format_help()
         try:
-            parsed_args = parser.parse_args(arg.split())
+            parsed_args = parser.parse_args(shlex.split(arg))
         except SystemExit:
             return
         in_dir, cst_path = self.split_cst_path(parsed_args.in_dir)
@@ -1611,7 +1611,7 @@ everything.
                                  '\'ro\' or \'b-\'.')
         self.do_plot_dir_rmsd_vs_score.__func__.__doc__ = parser.format_help()
         try:
-            parsed_args = parser.parse_args(arg.split())
+            parsed_args = parser.parse_args(shlex.split(arg))
         except SystemExit:
             return
         in_dir, cst_path = self.split_cst_path(parsed_args.in_dir)
