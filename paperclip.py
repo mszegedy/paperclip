@@ -1857,7 +1857,7 @@ everything.
         dirs_and_csts = [self.split_cst_path(d) for d in parsed_args.dirs]
         try:
             for index, pdbdir_and_cst in enumerate(dirs_and_csts):
-                pdbdir, cst_path = dirs_and_csts
+                pdbdir, cst_path = pdbdir_and_cst
                 prototype = pdbmatrices[index % npdbs]
                 filenames = os.listdir(pdbdir)
                 scores = None
@@ -1943,7 +1943,7 @@ if __name__ == '__main__':
         DEVNULL = open(os.devnull, 'w')
         sys.stdout = DEVNULL
     if parsed_args.script is not None:
-        with open(parsed_args.script) as f:
+        with open(parsed_args.script, encoding='utf-8') as f:
             OURCMDLINE.cmdqueue.extend(f.read().splitlines())
     if parsed_args.backgroundp:
         OURCMDLINE.cmdqueue.extend(['quit'])
