@@ -13,9 +13,10 @@ interest. Most plotting commands are based on Matlab commands.
 
 ### Imports
 ## Python Standard Library
+# pylint: disable=import-error
 import re
 import types, copy
-import itertools, functools, operator
+import itertools, functools
 import zlib
 import csv
 import hashlib
@@ -33,7 +34,7 @@ from mpi4py import MPI
 import dill
 import numpy as np
 import matplotlib
-matplotlib.use('Agg') # otherwise lack of display breaks program
+matplotlib.use('Agg') # otherwise lack of display breaks it
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pyrosetta as pr
@@ -43,7 +44,7 @@ import mszpyrosettaextension as mpre
 
 DEBUG = True
 
-STDOUT = sys.stdout;
+STDOUT = sys.stdout
 MPICOMM   = MPI.COMM_WORLD
 MPIRANK   = MPICOMM.Get_rank()
 MPISIZE   = MPICOMM.Get_size()
@@ -380,6 +381,7 @@ def make_PDBDataBuffer_gather(data_name):
             else:
                 return [self_.data[indices[0]][indices[1]][indices[2]] \
                         for indices in file_indices_list]
+    # Why doesn't this *work*?
     gather.__name__ = 'gather_'+data_name
     gather.__doc__  = 'Call calculate_'+data_name+ \
                       '() on a list of file paths with concurrency magic.'
