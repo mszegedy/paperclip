@@ -298,7 +298,7 @@ def make_PDBDataBuffer_gather(data_name):
                                          status=MPISTATUS),
                             MPISTATUS.Get_source(),
                             MPISTATUS.Get_tag())
-                def save_result(proto_args, result_data, exportp=True):
+                def save_result(index, proto_args, result_data, exportp=True):
                     DEBUG_OUT('about to save result for ' + proto_args.pdbpath)
                     proto_args.file_paths = self_.file_paths
                     proto_args.update_paths()
@@ -309,12 +309,14 @@ def make_PDBDataBuffer_gather(data_name):
                             getattr(self_, 'export_'+data_name)(result_data)
                     else:
                         file_data[proto_args.accessor_string] = result_data
-                    file_indices_list.append([proto_args.pdbhash,
+                    file_indices_list.append([index,
+                                              proto_args.pdbhash,
                                               data_name,
                                               proto_args.accessor_string])
                     DEBUG_OUT('just saved result for ' + proto_args.pdbpath)
                 ## main loop
-                for uargs, ukwargs in unpack_args():
+                for index, uargs_and_ukwargs in enumerate(unpack_args()):
+                    uargs, ukwargs = uargs_and_ukwargs
                     proto_args = self_.proto_args(data_name, uargs, ukwargs)
                     # lazy cache retrieval!
                     for path in proto_args.paths:
@@ -322,7 +324,8 @@ def make_PDBDataBuffer_gather(data_name):
                     file_data = self_.data.setdefault(proto_args.pdbhash, {}) \
                                           .setdefault(data_name, {})
                     try:
-                        save_result(proto_args,
+                        save_result(index,
+                                    proto_args,
                                     file_data[proto_args.accessor_string],
                                     exportp=False)
                     except KeyError:
@@ -330,14 +333,14 @@ def make_PDBDataBuffer_gather(data_name):
                         proto_args.file_paths = None
                         DEBUG_OUT('assigning '+proto_args.pdbpath+' to ' + \
                                   str(result_source))
-                        MPICOMM.send(proto_args,
+                        MPICOMM.send([index, proto_args],
                                      dest=result_source, tag=WORK_TAG)
                         DEBUG_OUT('assignment sent')
                         if result_tag == DONE_TAG:
                             save_result(*result)
                             self_.changed_dirs.update(os.path.dirname(path) \
                                                       for path \
-                                                      in result[0].paths)
+                                                      in result[1].paths)
                             self_.update_caches()
                 ## clean up workers once we run out of stuff to assign
                 for _ in range(MPISIZE-1):
@@ -346,7 +349,7 @@ def make_PDBDataBuffer_gather(data_name):
                     if result_tag == DONE_TAG:
                         save_result(*result)
                         self_.changed_dirs.update(os.path.dirname(path) \
-                                                  for path in result[0].paths)
+                                                  for path in result[1].paths)
                         self_.update_caches()
                     DEBUG_OUT('all files done. killing '+str(result_source))
                     MPICOMM.send(QUIT_GATHERING_SIGNAL,
@@ -358,12 +361,13 @@ def make_PDBDataBuffer_gather(data_name):
                     package = MPICOMM.recv(source=0, tag=WORK_TAG)
                     if package == QUIT_GATHERING_SIGNAL:
                         break
-                    proto_args = package
+                    index, proto_args = package
                     result_data = \
                         getattr(self_, 'calculate_'+data_name) \
                                (*proto_args.calcargs,
                                 **proto_args.calckwargs)
-                    MPICOMM.send(copy.copy([proto_args,
+                    MPICOMM.send(copy.copy([index,
+                                            proto_args,
                                             result_data]),
                                  dest=0, tag=DONE_TAG)
             # Synchronize everything that could have possibly changed:
@@ -372,14 +376,16 @@ def make_PDBDataBuffer_gather(data_name):
             self_.cache_paths = MPICOMM.bcast(self_.cache_paths, root=0)
             file_indices_list = MPICOMM.bcast(file_indices_list, root=0)
             # All threads should be on the same page at this point.
+            file_indices_list.sort(key=lambda x: x[0])
+            # Sort by the index produced by enumerating unpack_args() above.
             if hasattr(self_, 'import_'+data_name):
                 return [getattr(self_, 'import_'+data_name) \
-                               (self_.data[indices[0]] \
-                                          [indices[1]] \
-                                          [indices[2]]) \
+                               (self_.data[indices[1]] \
+                                          [indices[2]] \
+                                          [indices[3]]) \
                         for indices in file_indices_list]
             else:
-                return [self_.data[indices[0]][indices[1]][indices[2]] \
+                return [self_.data[indices[1]][indices[2]][indices[3]] \
                         for indices in file_indices_list]
     # Why doesn't this *work*?
     gather.__name__ = 'gather_'+data_name
