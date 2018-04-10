@@ -37,7 +37,11 @@ import matplotlib
 matplotlib.use('Agg') # otherwise lack of display breaks it
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+# soon...
+# import pandas
+# import seaborn
 import pyrosetta as pr
+import pytraj as pt
 import mszpyrosettaextension as mpre
 
 ### Constants and messing around with libraries
@@ -869,7 +873,7 @@ class PDBDataBuffer():
                 return self_._stream
         return EncapsulatedFile()
 
-    ## Calculating Rosetta stuff
+    ## Calculating stuff
     # Each calculate_<whatever> also implicity creates a get_<whatever>, which
     # is just the same thing but with all the buffer/caching magic attached,
     # and with stream args replaced with path args. It also creates a
@@ -948,6 +952,14 @@ class PDBDataBuffer():
                                       base64.b85decode(encoded.encode())),
                                   np.uint8))[:size**2],
                           [size, size])
+    def calculate_traj_rmsd(self, mdcrd_path, prmtop_path,
+                            mask='!:WAT,Na+,Cl-'):
+        '''Calculates the RMSD over time of a trajectory, compensating for
+        rotation.'''
+        traj = pt.iterload(mdcrd_path, prmtop_path)
+        traj.autoimage()
+        return pt.rmsd(traj, ref=0, mask=mask)
+
 ### Main class
 
 class OurCmdLine(cmd.Cmd):
