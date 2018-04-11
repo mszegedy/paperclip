@@ -16,7 +16,9 @@ interest. Most plotting commands are based on Matlab commands.
 # pylint: disable=import-error
 import re
 import types, copy
+import math
 import itertools, functools
+from functools import reduce
 import zlib
 import csv
 import hashlib
@@ -37,12 +39,11 @@ import matplotlib
 matplotlib.use('Agg') # otherwise lack of display breaks it
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-# soon...
-# import pandas
-# import seaborn
+import seaborn as sns
+sns.set()
 import pyrosetta as pr
-import pytraj as pt
 import mszpyrosettaextension as mpre
+import pytraj as pt
 
 ### Constants and messing around with libraries
 
@@ -179,6 +180,49 @@ def process_params(params):
                 for param in params]
     else:
         return None
+
+## data manipulation
+
+def trim_outliers_left(l, threshold=2.5):
+    '''Takes a list of numbers, where the left hand side is assumed to be much
+    further away from the global average than the right hand side. Returns a
+    version of the list where the right-most 1/e-th of the numbers is first
+    unconditionally included, then the left hand limit of the slice is walked
+    leftwards until a number is encountered that is more than 'threshold'
+    standard deviations from the mean of the initial 1/e-th.'''
+    start_index = int(len(l)*0.632)
+    start_slice = l[start_index:]
+    mean = np.mean(start_slice)
+    std  = np.std(l)
+    scaled_threshold = threshold*std
+    new_start_index = start_index
+    while new_start_index > 0:
+        new_start_index -= 1
+        if not math.abs(l[new_start_index] - mean) <= scaled_threshold:
+            new_start_index += 1
+            break
+    return l[new_start_index:]
+
+## import/export functions for PDBDataBuffer data with multiple uses
+
+def compress_nparray(array):
+    # Final form is:
+    # [bunch of bits as Base-85 string,
+    #  side length of square matrix]
+    return [base64.b85encode(
+              # this 7 is the compression level -----------v
+                zlib.compress(np.packbits(array).tobytes(),7)).decode(),
+                array.shape]
+
+def decompress_nparray(compressed_array):
+    data, shape = compressed_array
+    return np.reshape(np.unpackbits(
+                          np.frombuffer(
+                              zlib.decompress(
+                                  base64.b85decode(data.encode())),
+                              np.uint8))[:reduce(lambda x,y: x*y,
+                                                 shape)],
+                      shape)
 
 ## PDBDataBuffer accessor makers
 
@@ -937,28 +981,26 @@ class PDBDataBuffer():
                                                  bound=bound)))
         return np.array(result)
     def export_neighbors(self, decoded):
-        # Final form is:
-        # [bunch of bits as Base-85 string,
-        #  side length of square matrix]
-        return [base64.b85encode(
-                    # this 7 is the compression level -----------v
-                    zlib.compress(np.packbits(decoded).tobytes(),7)).decode(),
-                decoded.shape[0]]
+        return compress_nparray(decoded)
     def import_neighbors(self, encoded):
-        encoded, size = encoded 
-        return np.reshape(np.unpackbits(
-                              np.frombuffer(
-                                  zlib.decompress(
-                                      base64.b85decode(encoded.encode())),
-                                  np.uint8))[:size**2],
-                          [size, size])
+        return decompress_nparray(encoded)
     def calculate_traj_rmsd(self, mdcrd_path, prmtop_path,
                             mask='!:WAT,Na+,Cl-'):
         '''Calculates the RMSD over time of a trajectory, compensating for
-        rotation.'''
+        rotation, from the first frame. Returns a one RMSD for each frame.'''
         traj = pt.iterload(mdcrd_path, prmtop_path)
         traj.autoimage()
         return pt.rmsd(traj, ref=0, mask=mask)
+    def calculate_traj_pairwise_distances(self, mdcrd_path, prmtop_path,
+                                          mask_1='@CA', mask_2='@CA'):
+        '''Calculates a pairwise distance matrix for two atom masks over a
+        trajectory. Returns one matrix for each frame.'''
+        traj = pt.iterload(mdcrd_path, prmtop_path)
+        return pt.pairwise_distance(traj, mask_1=mask_1, mask_2=mask_2)
+    def export_traj_pairwise_distances(self, decoded):
+        return compress_nparray(decoded)
+    def import_traj_pairwise_distances(self, encoded):
+        return decompress_nparray(encoded)
 
 ### Main class
 
