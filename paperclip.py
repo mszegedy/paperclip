@@ -1,4 +1,4 @@
-#!/opt/sw/packages/gcc-4.8/python/3.5.2/bin/python3
+#!~/anaconda3/bin/python3
 
 #### paperclip.py
 #### Plotting and Analyzing Proteins Employing Rosetta CLI with PAPERCLIP
@@ -30,17 +30,21 @@ import sys, traceback, inspect
 import ast
 import fcntl
 ## Other stuff
+# Decorators
 from decorator import decorator
 import timeout_decorator
+# Multithreading
 from mpi4py import MPI
 import dill
 import numpy as np
+# Plotting
 import matplotlib
 matplotlib.use('Agg') # otherwise lack of display breaks it
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import seaborn as sns
 sns.set()
+# Scientific computation
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
 import pytraj as pt
@@ -208,7 +212,7 @@ def trim_outliers_left(l, threshold=2.5):
 def compress_nparray(array):
     # Final form is:
     # [bunch of bits as Base-85 string,
-    #  side length of square matrix]
+    #  tuple containing matrix side lengths]
     return [base64.b85encode(
               # this 7 is the compression level -----------v
                 zlib.compress(np.packbits(array).tobytes(),7)).decode(),
@@ -1002,6 +1006,141 @@ class PDBDataBuffer():
     def import_traj_pairwise_distances(self, encoded):
         return decompress_nparray(encoded)
 
+### Helper classes for working with matplotlib (bleh)
+class PlotWrapper:
+    '''Wraps a static plot that occupies a single subplot index.'''
+    def __init__(self, plot_command, *plot_args, **plot_kwargs):
+        # string of Axes method name that produces the plot:
+        self.plot_type   = plot_type
+        # arguments to pass to plot method:
+        self.plot_args   = plot_args
+        self.plat_kwargs = plot_kwargs
+        # tick labels and indices (None means use default values):
+        self.xtick_indices = None
+        self.xtick_labels  = None
+        self.ytick_indices = None
+        self.ytick_labels  = None
+        # misc:
+        self.title = None
+    def plot(self, ax):
+        getattr(ax, self.plot_type)(*self.plot_args, **self.plot_kwargs)
+        if self.xtick_indices is not None:
+            ax.set_xticks(self.xtick_indices)
+        if self.xtick_labels is not None:
+            ax.set_xticklabels(self.xtick_labels)
+        if self.ytick_indices is not None:
+            ax.set_yticks(self.ytick_indices)
+        if self.ytick_labels is not None:
+            ax.set_yticklabels(self.ytick_labels)
+        if self.title is not None:
+            ax.set_title(self.title)
+
+class AnimatedPlotWrapper:
+    '''Wraps an animation of a single axes object.'''
+    def __init__(self, init_f, update_f, frames):
+        # environment containing any persistent objects for animation;
+        # generally will contain at least a PlotWrapper, by convention under
+        # the keyword 'pw' (easily retrieved from the outside with the property
+        # method .pw); it's the job of init_f to populate it
+        self.env      = {}
+        # frame numbers to call update with when animation runs:
+        self.frames = frames
+        # called before the animation is run, and takes an Axes object as its
+        # first argument, and self.env as its second argument
+        self.init_f      = init_f
+        self.init_args   = []
+        self.init_kwargs = {}
+        # update_f is called during every frame of the animation, and takes the
+        # frame number as its first argument, and self.env as its second
+        self.update_f = update_f
+        self.update_args   = []
+        self.update_kwargs = {}
+    @property
+    def frame_n(self):
+        return len(self.frames)
+    @property
+    def pw(self):
+        '''The main PlotWrapper object of the animation, if any.'''
+        try:
+            return self.env['pw']
+        except KeyError:
+            return None
+    def set_init_args(self, *args, **kwargs):
+        self.init_args   = args
+        self.init_kwargs = kwargs
+    def set_update_args(self, *args, **kwargs):
+        self.update_args   = args
+        self.update_kwargs = kwargs
+    def init(self, ax):
+        return self.init_f(ax,
+                           self.env,
+                           *self.init_args,
+                           **self.init_kwargs)
+    def update(self, ax, frame):
+        return self.update_f(ax,
+                             frame,
+                             self.env,
+                             *self.update_args,
+                             **self.update_kwargs)
+
+class MatplotlibBuffer:
+    def __init__(self):
+        ## pre-init, post-init commands
+        # commands to perform before plots and animation inits are run,
+        # encapsulated in functools.partial objects taking no args:
+        self.pre_commands = []
+        # commands to perform after plots and animation inits are run,
+        # encapsulated in functools.partial objects taking no args:
+        self.post_commands = []
+        ## GridSpec emulation stuff
+        # (# rows, # cols) for grid in GridSpec; changed with .set_grid()
+        self.grid_size = (1, 1)
+        # Current index at which new schemes are saved, which is the two sets
+        # of grid coordinates that will be used for the GridSpec position of
+        # the axes at which the scheme will be made. Coordinates are
+        # slice-style, going in-between actual grid locations. So an m by n
+        # grid will have y coords running from 0 to m, and x coords running
+        # from 0 to n.
+        self.subgrid = ((0,0), (1,1))
+        # dict containing all plots and animations (collectively called
+        # "schemes"); should only be added with .add_plot() and
+        # .add_animation(), which will both use self.subgrid as the key
+        self.schemes = {}
+    ## Set methods
+    def set_grid(self, rows, cols):
+        self.grid_size = (rows, cols)
+    ## Interaction with self.schemes
+    def clear_matplotlib(self):
+        plt.cla()
+        plt.clf()
+    def clear(self):
+        self.__init__()
+        self.clear_matplotlib()
+    def add_scheme(self, scheme):
+        self.schemes.set_default(self.subgrid, [])
+        self.schemes[self.subgrid].append(scheme)
+    def add_plot(self, plot_command, *plot_args, **plot_kwargs):
+        self.add_scheme(PlotWrapper(plot_command, *plot_args, **plot_kwargs))
+    def add_animation(self, init_f, update_f, frames):
+        self.add_scheme(AnimatedPlotWrapper(init_f, update_f, frames))
+    ## Actual plotting functionality
+    def run_inits(self):
+        self.clear_matplotlib()
+        for command in self.pre_commands:
+            command()
+        if self.grid_size == (1,1):
+            gs = None
+            ax = plt.gca()
+        else:
+            gs = matplotlib.gridspec.GridSpec(*self.grid_size)
+            ax = None
+        for subgrid in self.schemes.keys():
+            # get axes we're gonna be using if using GridSpec
+            if gs is not None:
+                (tx, ty), (bx, by) = subgrid
+                ax = gs[ty:by, tx:bx]
+            for scheme in 
+
 ### Main class
 
 class OurCmdLine(cmd.Cmd):
@@ -1018,10 +1157,11 @@ class OurCmdLine(cmd.Cmd):
                 'continuous_mode': False}
     timelimit = 0
     last_im = None
-    ## The two buffers:
-    data_buffer = PDBDataBuffer() # contains computed data about PDBs
-    text_buffer = io.StringIO()   # contains text output, formatted as a TSV
-    # There is also a plot buffer, but that is contained within pyplot.
+    ## The three buffers:
+    mtpl_buffer = {'cmd_queue':  [], # contains queue of matplotlib commands
+                   'anim_queue': []} # contains queue of matplotlib animations
+    data_buffer = PDBDataBuffer()    # contains computed data about PDBs
+    text_buffer = io.StringIO()      # contains text output, formatted as a TSV
 
     ## Housekeeping
     def do_quit(self, arg):
@@ -1970,7 +2110,28 @@ everything.
             plt.bar(indices, values, yerr=errors,
                     color=parsed_args.colors, ecolor='k',
                     width=width)
-
+    def do_save_trajectory_report(self, arg):
+        parser = argparse.ArgumentParser(
+            description = 'Saves an animation of a trajectory, in which there '
+                          'are plots indicating the RMSD over time, the '
+                          'fraction native contacts over time, and heatmaps '
+                          'indicating the Ca distances for residues, and '
+                          'difference from native Ca distance.')
+        parser.add_argument('mdcrd_path',
+                            dest='store')
+        parser.add_argument('prmtop_path',
+                            dest='store')
+        self.do_save_trajectory_report \
+            .__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        rmsds = self.data_buffer.get_traj_rmsd(parsed_args.mdcrd_path,
+                                               parsed_args.prmtop_path)
+        dists = self.data_buffer.get_traj_parwise_distances(
+                         parsed_args.mdcrd_path,
+                         parsed_args.prmtop_path)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
