@@ -70,6 +70,7 @@ ROSETTA_RMSD_TYPES = ['gdtsc',
                       'nbr_atom_rmsd']
 
 ### Decorators
+## Decorators that work with PYROSETTA_ENV
 
 @decorator
 def needs_pr_init(f, *args, **kwargs):
@@ -89,12 +90,23 @@ def needs_pr_scorefxn(f, *args, **kwargs):
         PYROSETTA_ENV.set_scorefxn()
     return f(*args, **kwargs)
 
+## Decorators that work with the PDBDataBuffer constructor
+
 def uses_pr_env(f):
     '''Sets an attribute on the function that tells PDBDataBuffer to include a
     hash of the PyRosetta env as a storage key for the output of this function.
     Useless for functions that aren't calculate_ methods in PDBDataBuffer.'''
     f.uses_pr_env_p = True
     return f
+def returns_nparray(f):
+    '''Sets an attribute on the function that tells PDBDataBuffer to make import_
+    and export_ methods for this function that respectively decompress and
+    compress the Numpy array it returns. Useless for functions that aren't
+    calculate_ methods in PDBDataBuffer.'''
+    f.returns_nparray = True
+    return f
+
+## Decorators that add functionality when run by users
 
 def times_out(f):
     '''Makes a function time out after it hits self.timelimit.'''
@@ -563,6 +575,12 @@ class PDBDataBuffer():
         for data_name in (attribute_name[10:] \
                           for attribute_name in attribute_names \
                           if attribute_name.startswith('calculate_')):
+            if hasattr(getattr(self, 'calculate_'+data_name),
+                       'returns_nparray'):
+                setattr(self, 'import_'+data_name,
+                        types.MethodType(decompress_nparray, self))
+                setattr(self, 'export_'+data_name,
+                        types.MethodType(compress_nparray, self))
             setattr(self, 'get_'+data_name,
                     types.MethodType(make_PDBDataBuffer_get(data_name), self))
             setattr(self, 'gather_'+data_name,
@@ -963,6 +981,7 @@ class PDBDataBuffer():
         pose_lhs = mpre.pose_from_pdbstring(lhs_stream.read(), params=params)
         pose_rhs = mpre.pose_from_pdbstring(rhs_stream.read(), params=params)
         return getattr(pr.rosetta.core.scoring, rmsd_type)(pose_lhs, pose_rhs)
+    @returns_nparray
     @needs_pr_init
     def calculate_neighbors(self, stream, params=None, coarsep=False,
                             bound=None):
@@ -984,37 +1003,34 @@ class PDBDataBuffer():
                                                  coarsep=coarsep,
                                                  bound=bound)))
         return np.array(result)
-    def export_neighbors(self, decoded):
-        return compress_nparray(decoded)
-    def import_neighbors(self, encoded):
-        return decompress_nparray(encoded)
+    @returns_nparray
     def calculate_traj_rmsd(self, mdcrd_path, prmtop_path,
                             mask='!:WAT,Na+,Cl-'):
         '''Calculates the RMSD over time of a trajectory, compensating for
         rotation, from the first frame. Returns a one RMSD for each frame.'''
         traj = pt.iterload(mdcrd_path, prmtop_path)
         traj.autoimage()
-        return pt.rmsd(traj, ref=0, mask=mask)
+        return np.array(pt.rmsd(traj, ref=0, mask=mask))
+    @returns_nparray
     def calculate_traj_pairwise_distances(self, mdcrd_path, prmtop_path,
                                           mask_1='@CA', mask_2='@CA'):
         '''Calculates a pairwise distance matrix for two atom masks over a
         trajectory. Returns one matrix for each frame.'''
         traj = pt.iterload(mdcrd_path, prmtop_path)
         return pt.pairwise_distance(traj, mask_1=mask_1, mask_2=mask_2)
-    def export_traj_pairwise_distances(self, decoded):
-        return compress_nparray(decoded)
-    def import_traj_pairwise_distances(self, encoded):
-        return decompress_nparray(encoded)
 
 ### Helper classes for working with matplotlib (bleh)
 class PlotWrapper:
     '''Wraps a static plot that occupies a single subplot index.'''
-    def __init__(self, plot_command, *plot_args, **plot_kwargs):
+    def __init__(self, plot_type, *plot_args, **plot_kwargs):
         # string of Axes method name that produces the plot:
         self.plot_type   = plot_type
         # arguments to pass to plot method:
         self.plot_args   = plot_args
         self.plat_kwargs = plot_kwargs
+        # plot limits; should be two-element tuples of upper and lower bounds:
+        self.xlim = None
+        self.ylim = None
         # tick labels and indices (None means use default values):
         self.xtick_indices = None
         self.xtick_labels  = None
@@ -1023,7 +1039,11 @@ class PlotWrapper:
         # misc:
         self.title = None
     def plot(self, ax):
-        getattr(ax, self.plot_type)(*self.plot_args, **self.plot_kwargs)
+        ret = getattr(ax, self.plot_type)(*self.plot_args, **self.plot_kwargs)
+        if self.xlim is not None:
+            ax.set_xlim(left=self.xlim[0], right=self.xlim[1])
+        if self.ylim is not None:
+            ax.set_ylim(left=self.xlim[0], right=self.ylim[1])
         if self.xtick_indices is not None:
             ax.set_xticks(self.xtick_indices)
         if self.xtick_labels is not None:
@@ -1034,8 +1054,9 @@ class PlotWrapper:
             ax.set_yticklabels(self.ytick_labels)
         if self.title is not None:
             ax.set_title(self.title)
+        return ret
 
-class AnimatedPlotWrapper:
+class AnimatedAxesWrapper:
     '''Wraps an animation of a single axes object.'''
     def __init__(self, init_f, update_f, frames):
         # environment containing any persistent objects for animation;
@@ -1047,7 +1068,7 @@ class AnimatedPlotWrapper:
         self.frames = frames
         # called before the animation is run, and takes an Axes object as its
         # first argument, and self.env as its second argument
-        self.init_f      = init_f
+        self.init_f = init_f
         self.init_args   = []
         self.init_kwargs = {}
         # update_f is called during every frame of the animation, and takes the
@@ -1061,10 +1082,10 @@ class AnimatedPlotWrapper:
     @property
     def pw(self):
         '''The main PlotWrapper object of the animation, if any.'''
-        try:
-            return self.env['pw']
-        except KeyError:
-            return None
+        return self.env.get('pw')
+    @pw.setter
+    def pw(self, value):
+        self.env['pw'] = value
     def set_init_args(self, *args, **kwargs):
         self.init_args   = args
         self.init_kwargs = kwargs
@@ -1076,6 +1097,11 @@ class AnimatedPlotWrapper:
                            self.env,
                            *self.init_args,
                            **self.init_kwargs)
+    def plot(self, ax):
+        try:
+            return self.pw.plot(ax)
+        except AttributeError:
+            return
     def update(self, ax, frame):
         return self.update_f(ax,
                              frame,
@@ -1106,24 +1132,59 @@ class MatplotlibBuffer:
         # "schemes"); should only be added with .add_plot() and
         # .add_animation(), which will both use self.subgrid as the key
         self.schemes = {}
-    ## Set methods
-    def set_grid(self, rows, cols):
-        self.grid_size = (rows, cols)
+    ## Properties
+    @property
+    def current_scheme_list(self):
+        return self.schemes.set_default(self.subgrid, [])
+    @current_scheme_list.setter
+    def current_scheme_list(self, value):
+        self.schemes[self.subgrid] = value
+    @property
+    def current_scheme(self):
+        try:
+            return self.current_scheme_list[-1]
+        except IndexError:
+            return None
+    @current_scheme.setter
+    def current_scheme(self, value):
+        # "let it fail"; you can always catch the error or check beforehand to
+        # see whether current_scheme is None
+        self.current_scheme_list[-1] = value
+    @property
+    def current_plot(self):
+        if isinstance(self.current_scheme, PlotWrapper):
+            return self.current_scheme
+        elif isinstance(self.current_scheme, AnimatedAxesWrapper):
+            return self.current_scheme.pw
+        else:
+            raise TypeError('Current scheme is neither a PlotWrapper nor an '
+                            'AnimatedAxesWrapper.')
+    @current_plot.setter
+    def current_plot(self, value):
+        # this method should fail if and only if one of the following is true:
+        # - assigning to current_scheme also fails
+        # - current_scheme is neither a PlotWrapper nor an AnimatedAxesWrapper
+        if isinstance(self.current_scheme, PlotWrapper):
+            self.current_scheme = value
+        elif isinstance(self.current_scheme, AnimatedAxesWrapper):
+            self.current_scheme.pw = value
+        else:
+            raise TypeError('Current scheme is neither a PlotWrapper nor an '
+                            'AnimatedAxesWrapper.')
     ## Interaction with self.schemes
+    def add_scheme(self, scheme):
+        self.current_scheme_list.append(scheme)
+    def add_plot(self, plot_command, *plot_args, **plot_kwargs):
+        self.add_scheme(PlotWrapper(plot_command, *plot_args, **plot_kwargs))
+    def add_animation(self, init_f, update_f, frames):
+        self.add_scheme(AnimatedAxesWrapper(init_f, update_f, frames))
+    ## Interaction with matplotlib :(
     def clear_matplotlib(self):
         plt.cla()
         plt.clf()
     def clear(self):
         self.__init__()
         self.clear_matplotlib()
-    def add_scheme(self, scheme):
-        self.schemes.set_default(self.subgrid, [])
-        self.schemes[self.subgrid].append(scheme)
-    def add_plot(self, plot_command, *plot_args, **plot_kwargs):
-        self.add_scheme(PlotWrapper(plot_command, *plot_args, **plot_kwargs))
-    def add_animation(self, init_f, update_f, frames):
-        self.add_scheme(AnimatedPlotWrapper(init_f, update_f, frames))
-    ## Actual plotting functionality
     def run_inits(self):
         self.clear_matplotlib()
         for command in self.pre_commands:
@@ -1139,7 +1200,7 @@ class MatplotlibBuffer:
             if gs is not None:
                 (tx, ty), (bx, by) = subgrid
                 ax = gs[ty:by, tx:bx]
-            for scheme in 
+            for scheme in self.schemes[subgrid]:
 
 ### Main class
 
@@ -1158,8 +1219,7 @@ class OurCmdLine(cmd.Cmd):
     timelimit = 0
     last_im = None
     ## The three buffers:
-    mtpl_buffer = {'cmd_queue':  [], # contains queue of matplotlib commands
-                   'anim_queue': []} # contains queue of matplotlib animations
+    mtpl_buffer = MatplotlibBuffer() # contains queued plots and animations
     data_buffer = PDBDataBuffer()    # contains computed data about PDBs
     text_buffer = io.StringIO()      # contains text output, formatted as a TSV
 
