@@ -17,6 +17,7 @@ interest. Most plotting commands are based on Matlab commands.
 import re
 import types, copy
 import math
+import fractions
 import itertools, functools
 from functools import reduce
 import zlib
@@ -198,6 +199,14 @@ def process_params(params):
         return None
 
 ## data manipulation
+
+def least_common_multiple(*l):
+    '''Least common multiple of some numbers.'''
+    if len(l) == 0:
+        raise ValueError('Least common multiple is not defined for sets of '
+                         'zero numbers.')
+    return reduce(lambda a,b: abs(a*b) / fractions.gcd(a,b) if a and b else 0,
+                  l)
 
 def trim_outliers_left(l, threshold=2.5):
     '''Takes a list of numbers, where the left hand side is assumed to be much
@@ -1041,9 +1050,15 @@ class PlotWrapper:
     def plot(self, ax):
         ret = getattr(ax, self.plot_type)(*self.plot_args, **self.plot_kwargs)
         if self.xlim is not None:
-            ax.set_xlim(left=self.xlim[0], right=self.xlim[1])
+            if self.xlim[0] is not None:
+                ax.set_xlim(left=self.xlim[0])
+            if self.xlim[1] is not None:
+                ax.set_xlim(right=self.xlim[1])
         if self.ylim is not None:
-            ax.set_ylim(left=self.xlim[0], right=self.ylim[1])
+            if self.ylim[0] is not None:
+                ax.set_ylim(left=self.ylim[0])
+            if self.ylim[1] is not None:
+                ax.set_ylim(right=self.ylim[1])
         if self.xtick_indices is not None:
             ax.set_xticks(self.xtick_indices)
         if self.xtick_labels is not None:
@@ -1063,7 +1078,7 @@ class AnimatedAxesWrapper:
         # generally will contain at least a PlotWrapper, by convention under
         # the keyword 'pw' (easily retrieved from the outside with the property
         # method .pw); it's the job of init_f to populate it
-        self.env      = {}
+        self.env = {}
         # frame numbers to call update with when animation runs:
         self.frames = frames
         # called before the animation is run, and takes an Axes object as its
@@ -1077,11 +1092,12 @@ class AnimatedAxesWrapper:
         self.update_args   = []
         self.update_kwargs = {}
     @property
-    def frame_n(self):
+    def n_frames(self):
         return len(self.frames)
     @property
     def pw(self):
-        '''The main PlotWrapper object of the animation, if any.'''
+        '''The main PlotWrapper object of the animation. Returns None if there
+        isn't any.'''
         return self.env.get('pw')
     @pw.setter
     def pw(self, value):
@@ -1119,8 +1135,13 @@ class MatplotlibBuffer:
         # encapsulated in functools.partial objects taking no args:
         self.post_commands = []
         ## GridSpec emulation stuff
-        # (# rows, # cols) for grid in GridSpec; changed with .set_grid()
-        self.grid_size = (1, 1)
+        # (# rows, # cols) for grid in GridSpec; controlled through property
+        # grid_size, never invalidated
+        self._grid_size = (1, 1)
+        # matplotlib gridspec object representing grid on which axes objects
+        # are placed; controlled through property gridspec, invalidated when
+        # grid_size is changed
+        self._gridspec = None
         # Current index at which new schemes are saved, which is the two sets
         # of grid coordinates that will be used for the GridSpec position of
         # the axes at which the scheme will be made. Coordinates are
@@ -1132,7 +1153,38 @@ class MatplotlibBuffer:
         # "schemes"); should only be added with .add_plot() and
         # .add_animation(), which will both use self.subgrid as the key
         self.schemes = {}
+        # (subgrid, index) index pairs for all animations saved
+        self.animation_indices = set()
+        # number of frames animated so far
+        self.current_frame = 0
+        # total number of frames of animation, when all animations are run side
+        # by side until they collectively loop; controlled through property
+        # total_frames, invalidated when a new animation is added or the buffer
+        # is cleared
+        self._total_frames = None
     ## Properties
+    @property
+    def grid_size(self):
+        return self._grid_size
+    @grid_size.setter
+    def grid_size(self, value):
+        self._gridspec = None # invalidate gridspec cache
+        self._grid_size = value
+    @property
+    def gridspec(self):
+        if self._gridspec is not None:
+            return self._gridspec
+        if self.grid_size == (1,1):
+            return None
+        self._gridspec = matplotlib.gridspec.GridSpec(*self.grid_size)
+        return self._gridspec
+    @property
+    def current_axes(self):
+        if self.grid_size == (1,1):
+            ax = plt.gca()
+        else:
+            (tx, ty), (bx, by) = self.subgrid
+            return self.gridspec[ty:by, tx:bx]
     @property
     def current_scheme_list(self):
         return self.schemes.set_default(self.subgrid, [])
@@ -1171,36 +1223,92 @@ class MatplotlibBuffer:
         else:
             raise TypeError('Current scheme is neither a PlotWrapper nor an '
                             'AnimatedAxesWrapper.')
+    @property
+    def total_frames(self):
+        '''Returns the number of frames in the environment when all the
+        animations are run side by side until they collectively loop. Returns
+        None if there are no animations.'''
+        if self._total_frames is not None:
+            return self._total_frames
+        else:
+            try:
+                self._total_frames = least_common_multiple(
+                                         *(self.schemes[i[0]][i[1].n_frames] \
+                                           for i in self.animation_indices))
+            except ValueError:
+                pass
+            return self._total_frames
     ## Interaction with self.schemes
     def add_scheme(self, scheme):
+        if isinstance(scheme, AnimatedAxesWrapper):
+            self.animation_indices.add((self.subgrid,
+                                        len(self.current_scheme_list)))
+            self._total_frames = None
         self.current_scheme_list.append(scheme)
     def add_plot(self, plot_command, *plot_args, **plot_kwargs):
         self.add_scheme(PlotWrapper(plot_command, *plot_args, **plot_kwargs))
     def add_animation(self, init_f, update_f, frames):
         self.add_scheme(AnimatedAxesWrapper(init_f, update_f, frames))
     ## Interaction with matplotlib :(
+    # Base interactions
     def clear_matplotlib(self):
+        self._gridspec     = None
+        self.current_frame = 0
+        self._total_frames = None
         plt.cla()
         plt.clf()
-    def clear(self):
-        self.__init__()
-        self.clear_matplotlib()
+    def get_axes_from_subgrid(self, subgrid):
+        (tx, ty), (bx, by) = subgrid
+        return self.gridspec[ty:by, tx:bx]
     def run_inits(self):
         self.clear_matplotlib()
         for command in self.pre_commands:
             command()
-        if self.grid_size == (1,1):
-            gs = None
+        gs = self.gridspec
+        if gs is not None:
             ax = plt.gca()
         else:
-            gs = matplotlib.gridspec.GridSpec(*self.grid_size)
             ax = None
-        for subgrid in self.schemes.keys():
-            # get axes we're gonna be using if using GridSpec
+        for subgrid, scheme_list in self.schemes.items():
             if gs is not None:
-                (tx, ty), (bx, by) = subgrid
-                ax = gs[ty:by, tx:bx]
-            for scheme in self.schemes[subgrid]:
+                ax = self.get_axes_from_subgrid(subgrid)
+            for scheme in scheme_list:
+                if isinstance(scheme, PlotWrapper):
+                    scheme.plot(ax)
+                elif isinstance(scheme, AnimatedAxesWrapper):
+                    scheme.init(ax)
+        for command in self.post_commands:
+            command()
+    def run_animations(self, n_frames):
+        '''Execute animations for n_frames frames.'''
+        for _ in range(n_frames):
+            gs = self.gridspec
+            if gs is not None:
+                ax = plt.gca()
+            else:
+                ax = None
+            for subgrid, index in self.animation_indices:
+                if gs is not None:
+                    ax = self.get_axes_from_subgrid(subgrid)
+                scheme = self.schemes[subgrid][index]
+                frame  = self.current_frame
+                scheme.update(ax, scheme.frames[frame % scheme.n_frames])
+                self.current_frame = (frame + 1) % self.total_frames
+    # Higher-order (read: front-end) interactions
+    def clear(self):
+        self.__init__()
+        self.clear_matplotlib()
+    def set_current_frame(self, value):
+        '''Walks animations forwards until self.current_frame == value. If
+        self.current_frame > value, it resets the system.'''
+        if self.current_frame == value:
+            return
+        if self.current_frame > value:
+            self.clear_matplotlib()
+        self.run_animations(value - self.current_frame)
+    def save_static(self, path, format=None, frame=0):
+        self.set_current_frame(frame)
+        plt.savefig(path, format=format)
 
 ### Main class
 
@@ -1478,8 +1586,7 @@ commands run indefinitely.
     def do_clear_plot(self, arg):
         '''Clear the plot buffer:  clear_plot'''
         self.last_im = None
-        plt.cla()
-        plt.clf()
+        self.mtpl_buffer.clear()
 
     ## Basic Rosetta stuff
     def do_get_scorefxn(self, arg):
