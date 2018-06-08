@@ -31,6 +31,9 @@ import sys, traceback, inspect
 import ast
 import fcntl
 ## Other stuff
+# Mahmoud's boltons
+from boltons import funcutils
+from boltons.setutils import IndexedSet
 # Decorators
 from decorator import decorator
 import timeout_decorator
@@ -91,19 +94,19 @@ def needs_pr_scorefxn(f, *args, **kwargs):
         PYROSETTA_ENV.set_scorefxn()
     return f(*args, **kwargs)
 
-## Decorators that work with the PDBDataBuffer constructor
+## Decorators that work with the FileDataBuffer constructor
 
 def uses_pr_env(f):
-    '''Sets an attribute on the function that tells PDBDataBuffer to include a
+    '''Sets an attribute on the function that tells FileDataBuffer to include a
     hash of the PyRosetta env as a storage key for the output of this function.
-    Useless for functions that aren't calculate_ methods in PDBDataBuffer.'''
+    Useless for functions that aren't calculate_ methods in FileDataBuffer.'''
     f.uses_pr_env_p = True
     return f
 def returns_nparray(f):
-    '''Sets an attribute on the function that tells PDBDataBuffer to make import_
+    '''Sets an attribute on the function that tells FileDataBuffer to make import_
     and export_ methods for this function that respectively decompress and
     compress the Numpy array it returns. Useless for functions that aren't
-    calculate_ methods in PDBDataBuffer.'''
+    calculate_ methods in FileDataBuffer.'''
     f.returns_nparray = True
     return f
 
@@ -111,7 +114,7 @@ def returns_nparray(f):
 
 def times_out(f):
     '''Makes a function time out after it hits self.timelimit.'''
-    @functools.wraps(f)
+    @funcutils.wraps(f)
     def decorated(self_, *args, **kwargs):
         if self_.timelimit:
             try:
@@ -126,7 +129,7 @@ def times_out(f):
 def continuous(f):
     '''Makes a function in OurCmdLine repeat forever when continuous mode is
     enabled, and decorates it with times_out.'''
-    @functools.wraps(f)
+    @funcutils.wraps(f)
     @times_out
     def decorated(self_, *args, **kwargs):
         if self_.settings['continuous_mode']:
@@ -139,7 +142,7 @@ def continuous(f):
 def pure_plotting(f):
     '''Wraps "pure plotting" cmd commands that shouldn't be executed unless
     plotting is enabled.'''
-    @functools.wraps(f)
+    @funcutils.wraps(f)
     def decorated(self_, *args, **kwargs):
         if self_.settings['plotting']:
             return f(self_, *args, **kwargs)
@@ -228,7 +231,7 @@ def trim_outliers_left(l, threshold=2.5):
             break
     return l[new_start_index:]
 
-## import/export functions for PDBDataBuffer data with multiple uses
+## import/export functions for FileDataBuffer data with multiple uses
 
 def compress_nparray(array):
     # Final form is:
@@ -249,10 +252,10 @@ def decompress_nparray(compressed_array):
                                                  shape)],
                       shape)
 
-## PDBDataBuffer accessor makers
+## FileDataBuffer accessor makers
 
-def make_PDBDataBuffer_get(data_name):
-    '''Create a get_ accessor function for a PDBDataBuffer data type.'''
+def make_FileDataBuffer_get(data_name):
+    '''Create a get_ accessor function for a FileDataBuffer data type.'''
     # Python duck typing philosophy says we shouldn't do any explicit
     # checking of the thing stored at the attribute, but in any case,
     # it should be a function that takes at least one PDB file path as
@@ -299,8 +302,8 @@ def make_PDBDataBuffer_get(data_name):
                    '() on a file path with caching magic.'
     return get
 
-def make_PDBDataBuffer_gather(data_name):
-    '''Make a gather_ accessor for a PDBDataBuffer that concurrently operates
+def make_FileDataBuffer_gather(data_name):
+    '''Make a gather_ accessor for a FileDataBuffer that concurrently operates
     on a list of values for an argument,  instead of a single value.'''
     def gather(self_, *args, argi=0, **kwargs):
         # New keyword argument argi: which argument is to be made into a list.
@@ -466,7 +469,40 @@ def make_PDBDataBuffer_gather(data_name):
                       '() on a list of file paths with concurrency magic.'
     return gather
 
+## Input processing functions for OurCmd
+
+def process_ticks(arg):
+    '''Given the input string arg, return a tuple of a tuple of tick labels and
+    an nparray of tick indices that it describes. It's possible that it does not
+    describe any tick indices, in which case that part of the returning tuple
+    is left as none. The acceptable formats for arg are:
+        "'A A' 'B B' 'C C'"           -> (('A A', 'B B', 'C C'), None)
+        "A\ A B\ B C\ C"              -> (('A A', 'B B', 'C C'), None)
+        "('A', 1), ('B', 2), ('C', 3) -> (('A', 'B', 'C'), (1, 2, 3))"'''
+    tick_indices = None
+    tick_labels  = None
+    try:
+        parsed = ast.literal_eval(arg)
+        try:
+            tick_labels, tick_indices = zip(parsed)
+            tick_indices = np.array(tick_indices)
+        except:
+            raise ValidationError
+    except SyntaxError:
+        try:
+            parsed = ast.literal_eval("'{}'" % "','".join(shlex.split(arg)))
+            tick_indices = np.arange(len(parsed))
+            tick_labels = parsed
+        except:
+            raise ValidationError
+    return (tick_indices, tick_labels)
+
 ### Housekeeping classes
+
+class ValidationError(Exception):
+    '''Exception raised by functions that validate input, when validation
+    fails.'''
+    pass
 
 class PyRosettaEnv():
     '''Stores stuff relating to PyRosetta, like whether pr.init() has been
@@ -498,7 +534,7 @@ class PyRosettaEnv():
         hash_fun.update(weights.weighted_string_of(weights).encode())
         return hash_fun.hexdigest()
 
-class PDBDataBuffer():
+class FileDataBuffer():
     '''Singleton class that stores information about PDBs, to be used as this
     program's data buffer. Its purpose is to intelligently abstract the
     retrieval of information about PDBs in such a way that the information is
@@ -591,13 +627,13 @@ class PDBDataBuffer():
                 setattr(self, 'export_'+data_name,
                         types.MethodType(compress_nparray, self))
             setattr(self, 'get_'+data_name,
-                    types.MethodType(make_PDBDataBuffer_get(data_name), self))
+                    types.MethodType(make_FileDataBuffer_get(data_name), self))
             setattr(self, 'gather_'+data_name,
-                    types.MethodType(make_PDBDataBuffer_gather(data_name),
+                    types.MethodType(make_FileDataBuffer_gather(data_name),
                                      self))
     def retrieve_data_from_cache(self, dirpath, cache_fd=None):
         '''Retrieves data from a cache file of a directory. The data in the file
-        is a JSON of a data dict and a file_paths list of a PDBDataBuffer,
+        is a JSON of a data dict and a file_paths list of a FileDataBuffer,
         except instead of file paths, it has just filenames.'''
         if MPIRANK != 0:
             return
@@ -700,7 +736,7 @@ class PDBDataBuffer():
     ## Auxiliary classes
     def proto_args(self, data_name, args, kwargs):
         '''Given a set of args for a get_ accessor method, generate an object
-        that PDBDataBuffer accessor methods can use to both call calculate_
+        that FileDataBuffer accessor methods can use to both call calculate_
         methods and index into self.data and self.paths, based on
         EncapsulatedFile encapsulations of all of the paths passed to it. It
         stores a list and dict of the arg values with paths replaced by
@@ -916,7 +952,7 @@ class PDBDataBuffer():
         contents hash, and maybe contents stream of a file. The first three are
         accessed directly, while the last is accessed via an accessor method,
         so that it can be retrieved if necessary. Creating and updating the
-        object both update the external PDBDataBuffer's info on that pdb.'''
+        object both update the external FileDataBuffer's info on that pdb.'''
         class EncapsulatedFile():
             def __init__(self_):
                 self_.path = os.path.abspath(path)
@@ -1032,6 +1068,7 @@ class PDBDataBuffer():
 class PlotWrapper:
     '''Wraps a static plot that occupies a single subplot index.'''
     def __init__(self, plot_type, *plot_args, **plot_kwargs):
+        #### THIS PROBABLY USES MASSIVE AMOUNTS OF RAM PLEASE FIX ####
         # string of Axes method name that produces the plot:
         self.plot_type   = plot_type
         # arguments to pass to plot method:
@@ -1040,11 +1077,17 @@ class PlotWrapper:
         # plot limits; should be two-element tuples of upper and lower bounds:
         self.xlim = None
         self.ylim = None
+        # axes labels:
+        self.xlabel = None
+        self.ylabel = None
         # tick labels and indices (None means use default values):
         self.xtick_indices = None
         self.xtick_labels  = None
         self.ytick_indices = None
         self.ytick_labels  = None
+        # tick label rotations ('horizontal', 'vertical', or degrees):
+        self.xtick_rotation = None
+        self.ytick_rotation = None
         # misc:
         self.title = None
     def plot(self, ax):
@@ -1059,6 +1102,10 @@ class PlotWrapper:
                 ax.set_ylim(left=self.ylim[0])
             if self.ylim[1] is not None:
                 ax.set_ylim(right=self.ylim[1])
+        if self.xlabel is not None:
+            ax.xlabel(self.xlabel)
+        if self.ylabel is not None:
+            ax.ylabel(self.ylabel)
         if self.xtick_indices is not None:
             ax.set_xticks(self.xtick_indices)
         if self.xtick_labels is not None:
@@ -1067,6 +1114,10 @@ class PlotWrapper:
             ax.set_yticks(self.ytick_indices)
         if self.ytick_labels is not None:
             ax.set_yticklabels(self.ytick_labels)
+        if self.xtick_rotation is not None:
+            ax.tick_params(axis='x', labelrotation=self.xtick_rotation)
+        if self.ytick_rotation is not None:
+            ax.tick_params(axis='y', labelrotation=self.ytick_rotation)
         if self.title is not None:
             ax.set_title(self.title)
         return ret
@@ -1134,6 +1185,7 @@ class MatplotlibBuffer:
         # commands to perform after plots and animation inits are run,
         # encapsulated in functools.partial objects taking no args:
         self.post_commands = []
+
         ## GridSpec emulation stuff
         # (# rows, # cols) for grid in GridSpec; controlled through property
         # grid_size, never invalidated
@@ -1149,6 +1201,10 @@ class MatplotlibBuffer:
         # grid will have y coords running from 0 to m, and x coords running
         # from 0 to n.
         self.subgrid = ((0,0), (1,1))
+
+        ## plotting and animation stuff
+        # tuple containing canvas size in inches, as (w, h)
+        self.canvas_size = None
         # dict containing all plots and animations (collectively called
         # "schemes"); should only be added with .add_plot() and
         # .add_animation(), which will both use self.subgrid as the key
@@ -1187,7 +1243,7 @@ class MatplotlibBuffer:
             return self.gridspec[ty:by, tx:bx]
     @property
     def current_scheme_list(self):
-        return self.schemes.set_default(self.subgrid, [])
+        return self.schemes.setdefault(self.subgrid, [])
     @current_scheme_list.setter
     def current_scheme_list(self, value):
         self.schemes[self.subgrid] = value
@@ -1238,6 +1294,11 @@ class MatplotlibBuffer:
             except ValueError:
                 pass
             return self._total_frames
+    ## Interaction with self.pre_commands and self.post_commands
+    def add_pre_command(self, f, *args, **kwargs):
+        self.pre_commands.append(functools.partial(f, *args, **kwargs))
+    def add_post_command(self, f, *args, **kwargs):
+        self.post_commands.append(functools.partial(f, *args, **kwargs))
     ## Interaction with self.schemes
     def add_scheme(self, scheme):
         if isinstance(scheme, AnimatedAxesWrapper):
@@ -1264,6 +1325,8 @@ class MatplotlibBuffer:
         self.clear_matplotlib()
         for command in self.pre_commands:
             command()
+        if self.canvas_size is not None:
+            plt.gcf().set_size_inches(*self.canvas_size())
         gs = self.gridspec
         if gs is not None:
             ax = plt.gca()
@@ -1291,9 +1354,9 @@ class MatplotlibBuffer:
                 if gs is not None:
                     ax = self.get_axes_from_subgrid(subgrid)
                 scheme = self.schemes[subgrid][index]
-                frame  = self.current_frame
+                frame  = self.current_frame % self.total_frames
                 scheme.update(ax, scheme.frames[frame % scheme.n_frames])
-                self.current_frame = (frame + 1) % self.total_frames
+                self.current_frame += 1
     # Higher-order (read: front-end) interactions
     def clear(self):
         self.__init__()
@@ -1301,14 +1364,17 @@ class MatplotlibBuffer:
     def set_current_frame(self, value):
         '''Walks animations forwards until self.current_frame == value. If
         self.current_frame > value, it resets the system.'''
+        if self.current_frame > value or value == 0:
+            self.run_inits()
+            self.current_frame = 0
         if self.current_frame == value:
             return
-        if self.current_frame > value:
-            self.clear_matplotlib()
         self.run_animations(value - self.current_frame)
     def save_static(self, path, format=None, frame=0):
+        # Yes I know format is a built-in function. Blame matplotlib.
         self.set_current_frame(frame)
         plt.savefig(path, format=format)
+    # save_animation goes here
 
 ### Main class
 
@@ -1328,7 +1394,7 @@ class OurCmdLine(cmd.Cmd):
     last_im = None
     ## The three buffers:
     mtpl_buffer = MatplotlibBuffer() # contains queued plots and animations
-    data_buffer = PDBDataBuffer()    # contains computed data about PDBs
+    data_buffer = FileDataBuffer()    # contains computed data about files
     text_buffer = io.StringIO()      # contains text output, formatted as a TSV
 
     ## Housekeeping
@@ -1524,7 +1590,7 @@ commands run indefinitely.
         '''Clear the data buffer of any data:  clear_data'''
         calculatingp = self.data_buffer.calculatingp
         cachingp     = self.data_buffer.cachingp
-        self.data_buffer = PDBDataBuffer()
+        self.data_buffer = FileDataBuffer()
         self.data_buffer.calculatingp = calculatingp
         self.data_buffer.cachingp     = cachingp
     def do_update_caches(self, arg):
@@ -1639,78 +1705,73 @@ commands run indefinitely.
         if MPIRANK == 0:
             if arg:
                 try:
-                    plt.savefig(arg, format=arg.split('.')[-1].lower())
+                    self.mtpl_buffer.save_static(arg,
+                                                 format=arg.split('.')[-1] \
+                                                           .lower())
                 except:
                     print('Valid extensions are .png, .pdf, .ps, .eps, and '
                           '.svg.')
             else:
                 print('Your plot needs a name.')
     @pure_plotting
-    def do_plot_size(self, arg):
-        '''Set the plot size in inches:  plot_size 10 10'''
+    def do_canvas_size(self, arg):
+        '''Set the canvas size in inches, giving the width first, then the
+height:
+    canvas_size 10 10'''
         try:
-            plt.gcf().set_size_inches(*(float(x) for x in arg.split()))
-        except:
+            val = tuple(float(x) for x in arg.split())
+            self.mtpl_buffer.canvas_size = val
+            assert len(val) == 2
+            assert val[0] > 0 and val[1] > 0
+        except ValueError, AssertionError:
             print('Provide two numbers separated by spaces.')
     # titles and labels
     @pure_plotting
     def do_plot_title(self, arg):
         '''Set the title of the current plot:  plot_title My title'''
-        plt.title(arg)
+        self.mtpl_buffer.current_plot.title = arg
     @pure_plotting
     def do_plot_xlabel(self, arg):
         '''Set the x axis label of the current plot:  plot_xlabel My xlabel'''
-        plt.xlabel(arg)
+        self.mtpl_buffer.current_plot.xlabel = arg
     @pure_plotting
     def do_plot_ylabel(self, arg):
         '''Set the y axis label of the current plot:  plot_ylabel My ylabel'''
-        plt.ylabel(arg)
+        self.mtpl_buffer.current_plot.ylabel = arg
     @pure_plotting
     def do_xticks(self, arg):
         '''Set the xticks on your plot, optionally specifying location.
     xticks 'label 1' 'label 2' 'label 3' |
     xticks label\ 1  label\ 2  label\ 3  |
     xticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
-        tick_indices = []
-        tick_labels  = []
+        tick_indices = None
+        tick_labels  = None
         try:
-            parsed = ast.literal_eval(arg)
-            try:
-                tick_labels, tick_indices = zip(parsed)
-                tick_indices = np.array(tick_indices)
-            except:
-                print('Malformed input. See examples in help.')
-        except SyntaxError:
-            try:
-                parsed = ast.literal_eval('\''+'\',\''.join(shlex.split(arg))+'\'')
-                tick_indices = np.arange(len(parsed))
-                tick_labels = parsed
-            except:
-                print('Malformed input. See examples in help.')
-        plt.xticks(tick_indices, tick_labels)
+            tick_labels, tick_indices = process_ticks(arg)
+        except ValidationError:
+            print('Malformed input. See examples in help.')
+            return
+        current_plot = self.mtpl_buffer.current_plot
+        current_plot.xtick_labels = tick_labels
+        if tick_indices:
+            current_plot.xtick_indices  = tick_indices
     @pure_plotting
     def do_yticks(self, arg):
         '''Set the xticks on your plot, optionally specifying location.
     yticks 'label 1' 'label 2' 'label 3' |
     yticks label\ 1  label\ 2  label\ 3  |
     yticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
-        tick_indices = []
-        tick_labels  = []
+        tick_indices = None
+        tick_labels  = None
         try:
-            parsed = ast.literal_eval(arg)
-            try:
-                tick_labels, tick_indices = zip(parsed)
-                tick_indices = np.array(tick_indices)
-            except:
-                print('Malformed input. See examples in help.')
-        except SyntaxError:
-            try:
-                parsed = ast.literal_eval('\''+'\',\''.join(shlex.split(arg))+'\'')
-                tick_indices = np.arange(len(parsed))
-                tick_labels = parsed
-            except:
-                print('Malformed input. See examples in help.')
-        plt.yticks(tick_indices, tick_labels)
+            tick_labels, tick_indices = process_ticks(arg)
+        except ValidationError:
+            print('Malformed input. See examples in help.')
+            return
+        current_plot = self.mtpl_buffer.current_plot
+        current_plot.ytick_labels = tick_labels
+        if tick_indices:
+            current_plot.ytick_indices  = tick_indices
     @pure_plotting
     def do_set_xticks_rotation(self, arg):
         '''Set the rotation of the xtick labels in your plot.
@@ -1720,8 +1781,9 @@ commands run indefinitely.
                 arg = float(arg)
         except:
             print('Invalid rotation value. It should be "horizontal", '
-                  '"vertical", or a number.')
-        plt.setp(plt.xticks()[1], rotation=arg)
+                  '"vertical", or a number in degrees.')
+            return
+        self.mtpl_buffer.current_plot.xtick_rotation = arg
     @pure_plotting
     def do_set_yticks_rotation(self, arg):
         '''Set the rotation of the ytick labels in your plot.
@@ -1732,12 +1794,14 @@ commands run indefinitely.
         except:
             print('Invalid rotation value. It should be "horizontal", '
                   '"vertical", or a number.')
-        plt.setp(plt.yticks()[1], rotation=arg)
+            return
+        self.mtpl_buffer.current_plot.ytick_rotation = arg
     @pure_plotting
     def do_prune_xticks(self, arg):
         '''Remove every other xtick:  prune_xticks'''
-        ax = plt.gca()
-        ax.set_xticks(ax.get_xticks()[1:-1:2])
+        current_plot = self.mtpl_buffer.current_plot
+        current_plot.xtick_indices = current_plot.xtick_indices[1:-1:2]
+        current_plot.xtick_labels  = current_plot.xtick_labels[1:-1:2]
     # axes stuff
     def do_xlim(self, arg):
         '''Set limits for the x axis.
@@ -1746,7 +1810,7 @@ commands run indefinitely.
             left, right = arg.split()
             left  = None if left.lower()  == 'same' else float(left)
             right = None if right.lower() == 'same' else float(right)
-            plt.gca().set_xlim(left=left, right=right)
+            self.mtpl_buffer.current_plot.xlim = (left, right)
         except ValueError:
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
@@ -1758,85 +1822,92 @@ commands run indefinitely.
             left, right = arg.split()
             left  = None if left.lower()  == 'same' else float(left)
             right = None if right.lower() == 'same' else float(right)
-            plt.gca().set_ylim(left=left, right=right)
+            self.mtpl_buffer.current_plot.ylim = (left, right)
         except ValueError:
             print('Specify a value for each side of the limits. If you want to'
                   'leave it the same, write "SAME".')
     @pure_plotting
     def do_invert_xaxis(self, arg):
         '''Invert the current axes' x axis:  invert_xaxis'''
-        plt.gca().invert_xaxis()
+        self.mtpl_buffer.current_plot.xlim = tuple(reversed(self.mtpl_buffer \
+                                                                .current_plot \
+                                                                .xlim))
     @pure_plotting
     def do_invert_yaxis(self, arg):
         '''Invert the current axes' y axis:  invert_yaxis'''
-        plt.gca().invert_yaxis()
-    # subplot stuff
+        self.mtpl_buffer.current_plot.ylim = tuple(reversed(self.mtpl_buffer \
+                                                                .current_plot \
+                                                                .ylim))
+    # gridspec stuff
     @pure_plotting
-    def do_subplot(self, arg):
-        '''Create a subplot with Matlab syntax:  subplot 2 1 1'''
+    def do_grid_size(self, arg):
+        '''Set the numbers of rows and columns in the grid to which plots are
+aligned, if you are including multiple plots. Set the current subgrid with the
+command `subgrid`.
+    grid_size 2 2'''
         try:
-            args = arg.split()
-            if len(args) == 3:
-                plt.subplot(*[int(a) for a in args])
-            elif len(args) == 1:
-                plt.subplot(int(args[0]))
-        except RuntimeError:
-            print('That\'s not a valid subplot spec.')
+            val = tuple(int(x) for x in arg.split())
+            assert len(val) == 2
+            assert val[0] > 0 and val[1] > 0
+            self.mtpl_buffer.grid_size = val
+        except ValueError, AssertionError:
+            print('Provide two positive integers separated by spaces.')
     @pure_plotting
-    def do_subplot2grid(self, arg):
-        parser = argparse.ArgumentParser(
-            description='Create a subplot grid, first specifying the grid '
-                        'size, and then the subplot location on the grid. '
-                        'Optionally include a colspan or rowspan.')
-        parser.add_argument('specs',
-                            nargs=4,
-                            type=int,
-                            help='Four integers: the grid height and width, '
-                                 'then the coordinates of the location you\'re'
-                                 ' selecting (indexed from 0).')
-        parser.add_argument('--colspan',
-                            dest='colspan',
-                            action='store',
-                            type=int,
-                            default=1,
-                            help='Amount of columns your selection spans for.')
-        parser.add_argument('--rowspan',
-                            dest='rowspan',
-                            action='store',
-                            type=int,
-                            default=1,
-                            help='Amount of rows your selection spans for.')
-        self.do_subplot2grid.__func__.__doc__ = parser.format_help()
+    def do_subgrid(self, arg):
+        '''Set the subgrid selected for the current plot. This is specified as
+two sets of coordinates, which "slice out" the grid location you want,
+increasing from the top left corner; e.g., (0,0) and (1,1) will slice out a 1x1
+box from the top left corner of the grid.
+    subgrid (0, 0) (1, 1)'''
         try:
-            parsed_args = parser.parse_args(arg.split())
-        except SystemExit:
-            return
-        plt.subplot2grid(tuple(parsed_args.specs[0:2]),
-                         tuple(parsed_args.specs[2:4]),
-                         colspan=parsed_args.colspan,
-                         rowspan=parsed_args.rowspan)
+            val = ast.literal_eval(arg)
+
+            ## validation
+            assert isinstance(val, tuple)
+            assert len(val == 2)
+            assert False not in (isinstance(corner, tuple) for corner in val)
+            assert False not in (len(corner) == 2 for corner in val)
+            # check that all four numbers given are ints
+            assert False not in (False not in result \
+                                 for result in ((isinstance(bound, int) \
+                                                 for bound in corner) \
+                                                for corner in val))
+            # check that all four numbers given are non-negative
+            assert False not in (False not in result \
+                                 for result in ((bound >= 0 \
+                                                 for bound in corner) \
+                                                for corner in val))
+
+            self.mtpl_buffer.subgrid = arg
+        except ValueError, AssertionError:
+            print('Provide a syntactically correct Python tuple of two tuples '
+                  'of two non-negative integers. See help for an example.')
     @pure_plotting
     def do_tight_layout(self, arg):
         '''Adjust subplot spacing so that there's no overlaps between
 different subplots.
     tight_layout'''
-        plt.tight_layout()
+        def f():
+            plt.tight_layout()
+        self.mtpl_buffer.add_post_command(f)
     @pure_plotting
     def do_add_colorbar(self, arg):
         '''Add a colorbar to your figure next to a group of subplots, for the
 most recently plotted subplot. Don't call tight_layout after this; that breaks
 everything.
     add_colorbar'''
-        SPACE   = 0.2
-        PADDING = 0.7
-        plt.tight_layout()
-        fig = plt.gcf()
-        w,h = fig.get_size_inches()
-        fig.set_size_inches((w/(1-SPACE), h))
-        fig.subplots_adjust(right=1-SPACE)
-        cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
-                             SPACE*(1-PADDING),     0.7])
-        fig.colorbar(self.last_im, cax=cbax)
+        self.do_tight_layout('')
+        def f(last_im):
+            SPACE   = 0.2
+            PADDING = 0.7
+            fig = plt.gcf()
+            w,h = fig.get_size_inches()
+            fig.set_size_inches((w/(1-SPACE), h))
+            fig.subplots_adjust(right=1-SPACE)
+            cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
+                                SPACE*(1-PADDING),      0.7])
+            fig.colorbar(last_im, cax=cbax)
+        self.mtpl_buffer.add_post_command(f, self.last_im)
     ## Calculations stuff
     # Text
     @continuous
@@ -2027,7 +2098,7 @@ everything.
                                  ((scoreupbound is None) or \
                                   datapoint[1] < scoreupbound))))
         if self.settings['plotting']:
-            plt.plot(rmsds, scores, parsed_args.style)
+            self.mtpl_buffer.add_plot('plot', rmsds, scores, parsed_args.style)
     @continuous
     def do_plot_dir_neighbors(self, arg):
         parser = argparse.ArgumentParser(
