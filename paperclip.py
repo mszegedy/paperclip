@@ -2,7 +2,7 @@
 
 #### paperclip.py
 #### Plotting and Analyzing Proteins Employing Rosetta CLI with PAPERCLIP
-#### by Michael Szegedy, 2017 Oct
+#### by Michael Szegedy, 2018 Jun
 #### for Khare Lab at Rutgers University
 
 '''This is an interactive suite for generating a variety of plots based on data
@@ -469,7 +469,7 @@ def make_FileDataBuffer_gather(data_name):
                       '() on a list of file paths with concurrency magic.'
     return gather
 
-## Input processing functions for OurCmd
+## Input processing functions for OurCmdLine
 
 def process_ticks(arg):
     '''Given the input string arg, return a tuple of a tuple of tick labels and
@@ -490,7 +490,7 @@ def process_ticks(arg):
             raise ValidationError
     except SyntaxError:
         try:
-            parsed = ast.literal_eval("'{}'" % "','".join(shlex.split(arg)))
+            parsed = ast.literal_eval("'%s'," % "','".join(shlex.split(arg)))
             tick_indices = np.arange(len(parsed))
             tick_labels = parsed
         except:
@@ -620,14 +620,17 @@ class FileDataBuffer():
         for data_name in (attribute_name[10:] \
                           for attribute_name in attribute_names \
                           if attribute_name.startswith('calculate_')):
+            # specialized import/export functions
             if hasattr(getattr(self, 'calculate_'+data_name),
                        'returns_nparray'):
                 setattr(self, 'import_'+data_name,
                         types.MethodType(decompress_nparray, self))
                 setattr(self, 'export_'+data_name,
                         types.MethodType(compress_nparray, self))
+            # get_ function
             setattr(self, 'get_'+data_name,
                     types.MethodType(make_FileDataBuffer_get(data_name), self))
+            # gather_ function
             setattr(self, 'gather_'+data_name,
                     types.MethodType(make_FileDataBuffer_gather(data_name),
                                      self))
@@ -742,7 +745,7 @@ class FileDataBuffer():
         stores a list and dict of the arg values with paths replaced by
         EncapsulatedFiles, a corresponding list and dict of arg types ('path',
         'stream', or 'other' depending on what arg is requested by the
-        calculate_ method), and the path to the first PDB in the args, its
+        calculate_ method), and the path to the first file in the args, its
         contents hash, and the accessor string for the args (for indexing into
         self.data). It can also be iterated over to provide the arg values in
         the sequence in which they were originally part of the calculate_
@@ -763,11 +766,40 @@ class FileDataBuffer():
                 calcfxn = getattr(self, 'calculate_'+data_name)
                 argspec = inspect.getfullargspec(calcfxn)
                 accessor_list = []
+                # Now we classify and store the different types of args we were
+                # given, based on their names and contents. There are many
+                # different type classifications they could receive:
+                #   - other:  not a file
+                #   - stream: a stream pointing to a file
+                #   - path:   a path pointing to a file
+                #   - stream_list: a list of streams that point to files
+                #   - path_list:   a list of paths that point to files
+                #   - stream_setS: a set of streams that point to files
+                #   - stream_setT: a tuple of streams that point to files whose
+                #       order doesn't matter
+                #   - stream_setL: a list of streams that point to files whose
+                #       order doesn't matter
+                #   - path_setS, path_setT, path_setL: as stream_sets, but with
+                #       paths instead of streams
                 def check_if_first_path_arg(encapsulated):
+                    '''Checks we are at the first argument that takes a path,
+                    and if so, sets the path and hash (by which the retrieved
+                    information will be indexed) to the path and hash of the
+                    file referenced by the argument.'''
                     if len(self_.paths) == 1:
                         self_.pdbpath = encapsulated.path
                         self_.pdbhash = encapsulated.hash
                 def handle_path_arg(path):
+                    '''Encapsulates the contents of a filein an EncapsulatedFile
+                    object, and stores the following things in the following
+                    places:
+                      - the unique properties of the file in the
+                        EncapsulatedFile object
+                      - the path to the file in self_.paths
+                      - the hash of the file in accessor_list
+                      - possibly the path and hash in self_.pdbpath and
+                        self_.pdbhash if this is the first time something has
+                        been stored in self_.paths'''
                     encapsulated = self.encapsulate_file(path)
                     encapsulated.file_paths_dict = \
                         self_.file_paths[encapsulated.path]
@@ -892,6 +924,7 @@ class FileDataBuffer():
                                         for i in self_.indices[nargs:]))
             @property
             def calcargs(self_):
+                '''The positional arguments used for a calculate_ call.'''
                 # F U N C T I O N A L
                 return [{'stream':     lambda: arg.stream,
                          'path':       lambda: arg.path,
@@ -907,6 +940,7 @@ class FileDataBuffer():
                         for arg, arg_type in zip(self_.args, self_.args_types)]
             @property
             def calckwargs(self_):
+                '''The keyword arguments used for a calculate_ call.'''
                 # P R O G R A M M I N G
                 return {kwarg:{'stream':     lambda: value.stream,
                                'path':       lambda: value.path,
@@ -1165,10 +1199,8 @@ class AnimatedAxesWrapper:
                            *self.init_args,
                            **self.init_kwargs)
     def plot(self, ax):
-        try:
+        if self.pw is not None:
             return self.pw.plot(ax)
-        except AttributeError:
-            return
     def update(self, ax, frame):
         return self.update_f(ax,
                              frame,
@@ -1365,8 +1397,7 @@ class MatplotlibBuffer:
         '''Walks animations forwards until self.current_frame == value. If
         self.current_frame > value, it resets the system.'''
         if self.current_frame > value or value == 0:
-            self.run_inits()
-            self.current_frame = 0
+            self.run_inits() # sets self.current_frame to 0
         if self.current_frame == value:
             return
         self.run_animations(value - self.current_frame)
@@ -1391,7 +1422,6 @@ class OurCmdLine(cmd.Cmd):
                 'plotting': MPIRANK == 0,
                 'continuous_mode': False}
     timelimit = 0
-    last_im = None
     ## The three buffers:
     mtpl_buffer = MatplotlibBuffer() # contains queued plots and animations
     data_buffer = FileDataBuffer()    # contains computed data about files
@@ -1897,7 +1927,7 @@ most recently plotted subplot. Don't call tight_layout after this; that breaks
 everything.
     add_colorbar'''
         self.do_tight_layout('')
-        def f(last_im):
+        def f(subgrid):
             SPACE   = 0.2
             PADDING = 0.7
             fig = plt.gcf()
@@ -1906,8 +1936,16 @@ everything.
             fig.subplots_adjust(right=1-SPACE)
             cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
                                 SPACE*(1-PADDING),      0.7])
+            # use the given subgrid to extract the last AxesImage artist from
+            # the corresponding axes, so that it can be used for the colorbar
+            # (the colorbar method requires it because it contains the color
+            #  scale)
+            subgrid_schemes = self.schemes[subgrid]
+            imax = self.mtpl_buffer.get_axes_from_subgrid(subgrid)
+            last_im = next(artist for artist in reversed(imax.get_children()) \
+                           if isinstance(artist, matplotlib.image.AxesImage))
             fig.colorbar(last_im, cax=cbax)
-        self.mtpl_buffer.add_post_command(f, self.last_im)
+        self.mtpl_buffer.add_post_command(f, self.mtpl_buffer.subgrid)
     ## Calculations stuff
     # Text
     @continuous
