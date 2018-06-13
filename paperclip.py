@@ -33,7 +33,7 @@ import fcntl
 ## Other stuff
 # Mahmoud's boltons
 from boltons import funcutils
-from boltons.setutils import IndexedSet
+from boltons import setutils
 # Decorators
 from decorator import decorator
 import timeout_decorator
@@ -48,6 +48,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import seaborn as sns
 sns.set()
+import imageio
 # Scientific computation
 import pyrosetta as pr
 import mszpyrosettaextension as mpre
@@ -470,6 +471,17 @@ def make_FileDataBuffer_gather(data_name):
     return gather
 
 ## Input processing functions for OurCmdLine
+
+def process_subgrid(arg):
+    arg = ''.join((c for c in arg if c != ' '))
+    matcher = re.compile(r'\((\d+),(\d+)\),?'  # first coordinate
+                         r'\((\d+),(\d+)\),?') # second coordinate
+    matches = matcher.match(arg)
+    if None not in [matches.group(n) for n in range(5)]:
+        return ((matches.group(1), matches.group(2)),
+                (matches.group(3), matches.group(4)))
+    else:
+        raise ValidationError
 
 def process_ticks(arg):
     '''Given the input string arg, return a tuple of a tuple of tick labels and
@@ -1124,6 +1136,7 @@ class PlotWrapper:
         self.ytick_rotation = None
         # misc:
         self.title = None
+        self.tick_params = None
     def plot(self, ax):
         ret = getattr(ax, self.plot_type)(*self.plot_args, **self.plot_kwargs)
         if self.xlim is not None:
@@ -1154,6 +1167,8 @@ class PlotWrapper:
             ax.tick_params(axis='y', labelrotation=self.ytick_rotation)
         if self.title is not None:
             ax.set_title(self.title)
+        if self.tick_params is not None:
+            ax.tick_params(**self.tick_params)
         return ret
 
 class AnimatedAxesWrapper:
@@ -1242,7 +1257,7 @@ class MatplotlibBuffer:
         # .add_animation(), which will both use self.subgrid as the key
         self.schemes = {}
         # (subgrid, index) index pairs for all animations saved
-        self.animation_indices = set()
+        self.animation_indices = setutils.IndexedSet()
         # number of frames animated so far
         self.current_frame = 0
         # total number of frames of animation, when all animations are run side
@@ -1256,7 +1271,13 @@ class MatplotlibBuffer:
         return self._grid_size
     @grid_size.setter
     def grid_size(self, value):
-        self._gridspec = None # invalidate gridspec cache
+        # invalidate gridspec cache
+        self._gridspec = None
+        # clear axes from figure
+        fig = plt.gcf()
+        for ax in copy.copy(fig.axes):
+            fig.delaxes(ax)
+        # save value
         self._grid_size = value
     @property
     def gridspec(self):
@@ -1324,7 +1345,7 @@ class MatplotlibBuffer:
                                          *(self.schemes[i[0]][i[1].n_frames] \
                                            for i in self.animation_indices))
             except ValueError:
-                pass
+                self._total_frames = 1
             return self._total_frames
     ## Interaction with self.pre_commands and self.post_commands
     def add_pre_command(self, f, *args, **kwargs):
@@ -1345,15 +1366,26 @@ class MatplotlibBuffer:
     ## Interaction with matplotlib :(
     # Base interactions
     def clear_matplotlib(self):
+        '''Should reset matplotlib to its state at the beginning of the
+        program, as well as this object's member variables that keep track of
+        it.'''
+        # surprisingly, del is not the correct thing to use here, since there
+        # are functions that specifically check whether these are None. that
+        # said, if garbage collection is happening too slowly, you could always
+        # del and /then/ set it to None, i guess
         self._gridspec     = None
         self.current_frame = 0
         self._total_frames = None
         plt.cla()
         plt.clf()
     def get_axes_from_subgrid(self, subgrid):
+        if self.grid_size == (1,1) and subgrid == ((0,0), (1,1)):
+            return plt.gca()
         (tx, ty), (bx, by) = subgrid
         return self.gridspec[ty:by, tx:bx]
-    def run_inits(self):
+    def init_figure(self):
+        '''Clear and initialize matplotlib to frame 0 (which may be the only
+        frame, if there are no animations).'''
         self.clear_matplotlib()
         for command in self.pre_commands:
             command()
@@ -1397,7 +1429,7 @@ class MatplotlibBuffer:
         '''Walks animations forwards until self.current_frame == value. If
         self.current_frame > value, it resets the system.'''
         if self.current_frame > value or value == 0:
-            self.run_inits() # sets self.current_frame to 0
+            self.init_figure() # sets self.current_frame to 0
         if self.current_frame == value:
             return
         self.run_animations(value - self.current_frame)
@@ -1405,7 +1437,23 @@ class MatplotlibBuffer:
         # Yes I know format is a built-in function. Blame matplotlib.
         self.set_current_frame(frame)
         plt.savefig(path, format=format)
-    # save_animation goes here
+    def save_animation(self, path, format=None, fps=48, start_frame=0):
+        # all formats are allcaps, but i feel more comfortable being able to
+        # give lowercase formats
+        if hasattr(format, 'upper'):
+            format = format.upper()
+        # source of pixels:
+        canvas = plt.gcf().canvas
+        # destination of pixels:
+        writer = imageio.get_writer(path, format=format, fps=fps)
+        # the actual writing:
+        self.set_current_frame(start_frame)
+        for frame_i in range(self.total_frames):
+            canvas.draw()
+            writer.append_data(canvas.renderer._renderer)
+            if frame_i != self.total_frames-1:
+                self.run_animations(1)
+        writer.close()
 
 ### Main class
 
@@ -1734,13 +1782,30 @@ commands run indefinitely.
         # plotting should already be off, but it doesn't hurt to double-check
         if MPIRANK == 0:
             if arg:
-                try:
-                    self.mtpl_buffer.save_static(arg,
-                                                 format=arg.split('.')[-1] \
-                                                           .lower())
-                except:
-                    print('Valid extensions are .png, .pdf, .ps, .eps, and '
-                          '.svg.')
+                extension = arg.split('.')[-1].lower()
+                if extension in ('png', 'pdf', 'ps', 'eps', 'svg'):
+                    try:
+                        self.mtpl_buffer.save_static(arg, format=extension)
+                    except Exception as e:
+                        print('I tried to save your plot as a static image, '
+                              'but I encountered this error:')
+                        traceback.print_exc()
+                        print('If you didn\'t intend for the saved plot to be '
+                              'a static image, remember that files will be '
+                              'saved as static images if they have any of the '
+                              'following extensions: .png, .pdf, .ps, .eps, or '
+                              '.svg.')
+                else:
+                    try:
+                        self.mtpl_buffer.save_animation(arg)
+                    except Exception as e:
+                        print('I tried to save your plot as an animation, but '
+                              'I encountered this error:')
+                        traceback.print_exc()
+                        print('If you didn\'t intend for the saved plot to be '
+                              'an animation, remember that the only supported '
+                              'static formats are .png, .pdf, .ps, .eps, and '
+                              '.svg.')
             else:
                 print('Your plot needs a name.')
     @pure_plotting
@@ -1774,8 +1839,6 @@ height:
     xticks 'label 1' 'label 2' 'label 3' |
     xticks label\ 1  label\ 2  label\ 3  |
     xticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
-        tick_indices = None
-        tick_labels  = None
         try:
             tick_labels, tick_indices = process_ticks(arg)
         except ValidationError:
@@ -1791,8 +1854,6 @@ height:
     yticks 'label 1' 'label 2' 'label 3' |
     yticks label\ 1  label\ 2  label\ 3  |
     yticks ('label 1', 0.1), ('label 2', 0.2), ('label 3', 0.3)'''
-        tick_indices = None
-        tick_labels  = None
         try:
             tick_labels, tick_indices = process_ticks(arg)
         except ValidationError:
@@ -1809,7 +1870,7 @@ height:
         try:
             if arg not in ('horizontal', 'vertical'):
                 arg = float(arg)
-        except:
+        except ValueError:
             print('Invalid rotation value. It should be "horizontal", '
                   '"vertical", or a number in degrees.')
             return
@@ -1821,7 +1882,7 @@ height:
         try:
             if arg not in ('horizontal', 'vertical'):
                 arg = float(arg)
-        except:
+        except ValueError:
             print('Invalid rotation value. It should be "horizontal", '
                   '"vertical", or a number.')
             return
@@ -1890,28 +1951,10 @@ increasing from the top left corner; e.g., (0,0) and (1,1) will slice out a 1x1
 box from the top left corner of the grid.
     subgrid (0, 0) (1, 1)'''
         try:
-            val = ast.literal_eval(arg)
-
-            ## validation
-            assert isinstance(val, tuple)
-            assert len(val == 2)
-            assert False not in (isinstance(corner, tuple) for corner in val)
-            assert False not in (len(corner) == 2 for corner in val)
-            # check that all four numbers given are ints
-            assert False not in (False not in result \
-                                 for result in ((isinstance(bound, int) \
-                                                 for bound in corner) \
-                                                for corner in val))
-            # check that all four numbers given are non-negative
-            assert False not in (False not in result \
-                                 for result in ((bound >= 0 \
-                                                 for bound in corner) \
-                                                for corner in val))
-
-            self.mtpl_buffer.subgrid = arg
-        except ValueError, AssertionError:
-            print('Provide a syntactically correct Python tuple of two tuples '
-                  'of two non-negative integers. See help for an example.')
+            self.mtpl_buffer.subgrid = process_subgrid(arg)
+        except ValidationError:
+            print('Provide two coordinates externally delimited by parentheses '
+                  'and internally delimited by commas. See help for an example.')
     @pure_plotting
     def do_tight_layout(self, arg):
         '''Adjust subplot spacing so that there's no overlaps between
@@ -1922,12 +1965,16 @@ different subplots.
         self.mtpl_buffer.add_post_command(f)
     @pure_plotting
     def do_add_colorbar(self, arg):
-        '''Add a colorbar to your figure next to a group of subplots, for the
-most recently plotted subplot. Don't call tight_layout after this; that breaks
-everything.
-    add_colorbar'''
+        '''Add a colorbar to the right of your figure, for a
+specified subgrid. Don't call tight_layout after this; that breaks everything.
+    add_colorbar (0, 0) (1, 1)'''
+        try:
+            subgrid = process_subgrid(arg)
+        except ValidationError:
+            print('Provide two coordinates externally delimited by parentheses '
+                  'and internally delimited by commas. See help for an example.')
         self.do_tight_layout('')
-        def f(subgrid):
+        def f(mtpl_buffer, subgrid):
             SPACE   = 0.2
             PADDING = 0.7
             fig = plt.gcf()
@@ -1936,16 +1983,21 @@ everything.
             fig.subplots_adjust(right=1-SPACE)
             cbax = fig.add_axes([1-SPACE*(1-PADDING/2), 0.15,
                                 SPACE*(1-PADDING),      0.7])
-            # use the given subgrid to extract the last AxesImage artist from
+            # Use the given subgrid to extract the last AxesImage artist from
             # the corresponding axes, so that it can be used for the colorbar
             # (the colorbar method requires it because it contains the color
-            #  scale)
-            subgrid_schemes = self.schemes[subgrid]
-            imax = self.mtpl_buffer.get_axes_from_subgrid(subgrid)
+            #  scale). Note that, when running PAPERCLIP, if the user gives an
+            # image plotting command, then calls this, then gives another image
+            # plotting command on the same subgrid, then the colorbar will be
+            # for the second one, not the first. This is arguably somewhat
+            # unexpected behavior, but I'm gonna say it's Intended; if you want
+            # a colorbar different from the image that shows up in the axes,
+            # write a colorbar method that does that.
+            imax = mtpl_buffer.get_axes_from_subgrid(subgrid)
             last_im = next(artist for artist in reversed(imax.get_children()) \
                            if isinstance(artist, matplotlib.image.AxesImage))
             fig.colorbar(last_im, cax=cbax)
-        self.mtpl_buffer.add_post_command(f, self.mtpl_buffer.subgrid)
+        self.mtpl_buffer.add_post_command(f, self.mtpl_buffer, subgrid)
     ## Calculations stuff
     # Text
     @continuous
@@ -2173,13 +2225,14 @@ everything.
                            params=params)]
         if self.settings['plotting']:
             avg_matrix = np.mean(np.stack(results), axis=0)
-            self.last_im = \
-                plt.imshow(avg_matrix, cmap='jet', interpolation='nearest',
-                           extent=[parsed_args.start_i, parsed_args.end_i,
-                                   parsed_args.end_i, parsed_args.start_i],
-                           aspect=1, vmin=0, vmax=1)
-            plt.tick_params(axis='both', which='both',
-                            top='off', bottom='off', left='off', right='off')
+            self.mtpl_buffer.add_plot(
+                'imshow', avg_matrix, cmap='jet', interpolation='nearest',
+                extent=[parsed_args.start_i, parsed_args.end_i,
+                        parsed_args.end_i, parsed_args.start_i],
+                aspect=1, vmin=0, vmax=1)
+            self.mtpl_buffer.current_plot.tick_params = \
+                {'axis'='both', 'which'='both',
+                 'top'='off', 'bottom'='off', 'left'='off', 'right'='off'}
             self.do_prune_xticks('')
     @continuous
     def do_plot_neighbors_bar(self, arg):
@@ -2229,7 +2282,8 @@ everything.
                   'set of dirs.')
             traceback.print_exc()
         if self.settings['plotting']:
-            plt.barh(np.arange(len(values)), values, align='center')
+            self.mtpl_buffer.add_plot('barh', np.arange(len(values)), values,
+                                      align='center')
     @continuous
     def do_plot_neighbors_comparison_bar(self, arg):
         parser = argparse.ArgumentParser(
@@ -2383,9 +2437,9 @@ everything.
                                   ((i+(j-npdbs/2)*width \
                                     for j in range(npdbs)) \
                                    for i in range(nbins)))))
-            plt.bar(indices, values, yerr=errors,
-                    color=parsed_args.colors, ecolor='k',
-                    width=width)
+            self.mtpl_buffer.add_plot('bar', indices, values, yerr=errors,
+                                      color=parsed_args.colors, ecolor='k',
+                                      width=width)
     def do_save_trajectory_report(self, arg):
         parser = argparse.ArgumentParser(
             description = 'Saves an animation of a trajectory, in which there '
