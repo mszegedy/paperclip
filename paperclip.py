@@ -212,6 +212,14 @@ def least_common_multiple(*l):
     return reduce(lambda a,b: abs(a*b) / fractions.gcd(a,b) if a and b else 0,
                   l)
 
+def remove_nparray_diagonals(m, n_removed):
+    '''Remove diagonals from the center of and flatten a matrix.'''
+    return np.hstack(
+        [np.hstack(m[i][i+n_removed//2+1:] \
+                    for i in range(m.shape[0])),
+            np.hstack(m[i][:max(i-n_removed//2,0)] \
+                    for i in range(m.shape[0]))])
+
 def trim_outliers_left(l, threshold=2.5):
     '''Takes a list of numbers, where the left hand side is assumed to be much
     further away from the global average than the right hand side. Returns a
@@ -1088,7 +1096,6 @@ class FileDataBuffer():
                     result[-1].append(result[j-1][i-1])
                 else:
                     result[-1].append(
-                        # int for space efficiency in cache file
                         int(mpre.res_neighbors_p(pose,
                                                  i, j,
                                                  coarsep=coarsep,
@@ -1437,7 +1444,7 @@ class MatplotlibBuffer:
         # Yes I know format is a built-in function. Blame matplotlib.
         self.set_current_frame(frame)
         plt.savefig(path, format=format)
-    def save_animation(self, path, format=None, fps=48, start_frame=0):
+    def save_animation(self, path, format=None, fps=30, start_frame=0):
         # all formats are allcaps, but i feel more comfortable being able to
         # give lowercase formats
         if hasattr(format, 'upper'):
@@ -1445,7 +1452,7 @@ class MatplotlibBuffer:
         # source of pixels:
         canvas = plt.gcf().canvas
         # destination of pixels:
-        writer = imageio.get_writer(path, format=format, fps=fps)
+        writer = imageio.get_writer(path, format=format, mode='I', fps=fps)
         # the actual writing:
         self.set_current_frame(start_frame)
         for frame_i in range(self.total_frames):
@@ -1729,7 +1736,6 @@ commands run indefinitely.
     # Plot buffer
     def do_clear_plot(self, arg):
         '''Clear the plot buffer:  clear_plot'''
-        self.last_im = None
         self.mtpl_buffer.clear()
 
     ## Basic Rosetta stuff
@@ -1890,6 +1896,7 @@ height:
     @pure_plotting
     def do_prune_xticks(self, arg):
         '''Remove every other xtick:  prune_xticks'''
+        # DOES'T WORK DUE TO BUFFER STATELESSNESS; REWRITE AS A POST_COMMAND
         current_plot = self.mtpl_buffer.current_plot
         current_plot.xtick_indices = current_plot.xtick_indices[1:-1:2]
         current_plot.xtick_labels  = current_plot.xtick_labels[1:-1:2]
@@ -1998,6 +2005,17 @@ specified subgrid. Don't call tight_layout after this; that breaks everything.
                            if isinstance(artist, matplotlib.image.AxesImage))
             fig.colorbar(last_im, cax=cbax)
         self.mtpl_buffer.add_post_command(f, self.mtpl_buffer, subgrid)
+    # Plots
+    def do_add_frame_indicator(self, arg):
+        '''Add a red vertical line to the current plot, whose x-axis should be
+        the current animation frame. The line's x-position will always be the
+        current frame number.'''
+        def init(ax, env):
+            env['lines'] = ax.axvline(x=0, color='red')
+        def update(ax, frame, env):
+            data = env['lines'].get_data()
+            env['lines'].set_data(([frame, frame], data[1]))
+        self.mtpl_buffer.add_animation(init, update)
     ## Calculations stuff
     # Text
     @continuous
@@ -2370,14 +2388,6 @@ specified subgrid. Don't call tight_layout after this; that breaks everything.
             except:
                 print('Incorrectly specified score limits.')
                 return
-        # auxiliary function for the calculations
-        def remove_diagonals(m, n_removed):
-            '''Remove diagonals from the center of and flatten a matrix.'''
-            return np.hstack(
-                [np.hstack(m[i][i+n_removed//2+1:] \
-                           for i in range(m.shape[0])),
-                 np.hstack(m[i][:max(i-n_removed//2,0)] \
-                           for i in range(m.shape[0]))])
         # do the calculations
         values = []
         if parsed_args.errorsp:
@@ -2412,10 +2422,12 @@ specified subgrid. Don't call tight_layout after this; that breaks everything.
                 # get horizontally stacked versions of matrices with middle
                 # five diagonals removed
                 N_REMOVED_DIAG = 5 # number of removed diagonals; must be odd
-                linresults = [remove_diagonals(m, 5) for m in results]
+                linresults = [remove_nparray_diagonals(m, N_REMOVED_DIAG) \
+                              for m in results]
                 fracs = None
                 if parsed_args.missingp:
-                    linprototype = remove_diagonals(prototype, 5)
+                    linprototype = remove_nparray_diagonals(prototype,
+                                                            N_REMOVED_DIAG)
                     fracs = [np.sum(m*linprototype)/np.sum(linprototype) \
                              for m in linresults]
                 else:
@@ -2440,28 +2452,124 @@ specified subgrid. Don't call tight_layout after this; that breaks everything.
             self.mtpl_buffer.add_plot('bar', indices, values, yerr=errors,
                                       color=parsed_args.colors, ecolor='k',
                                       width=width)
-    def do_save_trajectory_report(self, arg):
+    def do_plot_traj_rmsd(self, arg):
         parser = argparse.ArgumentParser(
-            description = 'Saves an animation of a trajectory, in which there '
-                          'are plots indicating the RMSD over time, the '
-                          'fraction native contacts over time, and heatmaps '
-                          'indicating the Ca distances for residues, and '
-                          'difference from native Ca distance.')
+            description = 'Plots the total RMSD of a trajectory over time, '
+                          'with time measured in frames and RMSD measured in '
+                          'angstroms.')
         parser.add_argument('mdcrd_path',
                             dest='store')
         parser.add_argument('prmtop_path',
                             dest='store')
-        self.do_save_trajectory_report \
+        self.do_plot_traj_rmsd \
             .__func__.__doc__ = parser.format_help()
         try:
             parsed_args = parser.parse_args(shlex.split(arg))
         except SystemExit:
             return
-        rmsds = self.data_buffer.get_traj_rmsd(parsed_args.mdcrd_path,
-                                               parsed_args.prmtop_path)
-        dists = self.data_buffer.get_traj_parwise_distances(
-                         parsed_args.mdcrd_path,
-                         parsed_args.prmtop_path)
+        frames, rmsds = enumerate(
+                            self.data_buffer.get_traj_rmsd(
+                                                 parsed_args.mdcrd_path,
+                                                 parsed_args.prmtop_path))
+        self.mtpl_buffer.add_plot('plot', frames, rmsds)
+    def do_plot_traj_native_contact_fraction(self, arg):
+        parser = argparse.ArgumentParser(
+            description = 'Plots the fraction native Ca contacts of a '
+                          'trajectory over time, with time measured in frames, '
+                          'and the first frame being taken to be fully '
+                          '"native".')
+        parser.add_argument('mdcrd_path',
+                            dest='store')
+        parser.add_argument('prmtop_path',
+                            dest='store')
+        parser.add_argument('--missing-only',
+                            dest='missingp',
+                            action='store_true',
+                            help='Catalog fraction of nonnative contacts only '
+                                 'for contacts present in prototypes.')
+        parser.add_argument('--nonnative',
+                            dest='nonnativep',
+                            action='store_true',
+                            help='Catalog fraction nonnative contacts instead '
+                                 'of native contacts.')
+        self.do_plot_traj_native_contact_fraction \
+            .__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        frames, contacts = enumerate(
+            (self.data_buffer.get_traj_parwise_distances(
+                parsed_args.mdcrd_path,
+                parsed_args.prmtop_path) < 8).astype(int))
+        prototype = contacts[0]
+        # in natives, 0 indicates a native contact or native lack-of-contact,
+        # while 1 indicates a nonnative contact or a nonnative lack-of-contact
+        natives = [(frame - prototype)**2 for frame in contacts]
+        # linearize everything, and remove the center 5 diagonals
+        N_REMOVED_DIAG = 5 # number of removed diagonals; must be odd
+        linnatives   = [remove_nparray_diagonals(m, N_REMOVED_DIAG) \
+                        for m in natives]
+        fracs = None
+        if parsed_args.missingp:
+            linprototype = remove_nparray_diagonals(prototype, N_REMOVED_DIAG)
+            fracs = [np.sum(m*linprototype)/np.sum(linprototype) \
+                     for m in linnatives]
+        else:
+            fracs = [np.sum(m)/m.size for m in linresults]
+        if not parsed_args.nonnativep:
+            fracs = [1-m for m in fracs]
+        self.mtpl_buffer.add_plot('plot', frames, fracs)
+    def do_plot_traj_ca_distances(self, arg):
+        parser = argparse.ArgumentParser(
+            description = 'Plot an animated heatmap of the pairwise CA '
+                          'distances over a trajectory.')
+        parser.add_argument('mdcrd_path',
+                            dest='store')
+        parser.add_argument('prmtop_path',
+                            dest='store')
+        self.do_plot_traj_ca_distances \
+            .__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        dists = list(self.data_buffer.get_traj_parwise_distances(
+                                          parsed_args.mdcrd_path,
+                                          parsed_args.prmtop_path))
+        def init(ax, env):
+            env['dists'] = dists
+            env['pw'] = PlotWrapper('imshow', env['dists'][0])
+            env['image'] = env['pw'].plot(ax)
+        def update(ax, frame, env):
+            env['image'].set_data(env['dists'][frame])
+        self.mtpl_buffer.add_animation(init, update)
+    def do_plot_traj_ca_distances_deltas(self, arg):
+        parser = argparse.ArgumentParser(
+            description = 'Plot an animated heatmap of the differences of the '
+                          'pairwise CA distances from the initial frame over a '
+                          'trajectory.')
+        parser.add_argument('mdcrd_path',
+                            dest='store')
+        parser.add_argument('prmtop_path',
+                            dest='store')
+        self.do_plot_traj_ca_distances_deltas \
+            .__func__.__doc__ = parser.format_help()
+        try:
+            parsed_args = parser.parse_args(shlex.split(arg))
+        except SystemExit:
+            return
+        dists = list(self.data_buffer.get_traj_parwise_distances(
+                                          parsed_args.mdcrd_path,
+                                          parsed_args.prmtop_path))
+        deltas = [m-dists[0] for m in dists]
+        def init(ax, env):
+            env['deltas'] = deltas
+            env['pw'] = PlotWrapper('imshow', env['deltas'][0])
+            env['image'] = env['pw'].plot(ax)
+        def update(ax, frame, env):
+            env['image'].set_data(env['deltas'][frame])
+        self.mtpl_buffer.add_animation(init, update)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(

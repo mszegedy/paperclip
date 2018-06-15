@@ -4,14 +4,16 @@ PAPERCLIP
  with PAPERCLIP)
 
 Depends on:
-  Unix-like shell
-  Python3                  (Amarel module)
-  PyRosetta               (Python library)
-  mszpyrosettaextension   (Python library)
-  intel_mkl                (Amarel module)
-  mpi4py                  (Python library)
-  dill                    (Python library)
-  matplotlib              (Python library)
-  decorator               (Python library)
-  timeout_decorator       (Python library)
+  Unix-like shell                              (executable)
+  Anaconda                (executable, Python meta-library)
+  intel_mkl                                 (Amarel module)
+  mvapich2                                  (Amarel module)
+  openmpi                                   (Amarel module)
+  mpi4py                                   (Python library)
+  PyRosetta                                (Python library)
+  mszpyrosettaextension                    (Python library)
+  pytraj                                   (Python library)
+  dill                                     (Python library)
+  decorator                                (Python library)
+  timeout_decorator                        (Python library)
   
